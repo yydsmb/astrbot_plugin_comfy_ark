@@ -1,0 +1,20 @@
+# 统一换行符：仓库内一律 LF。
+# 理由：AstrBot 常跑在 Linux / Docker（含本机规划的 SimpFun 迁移），
+# 而 Git for Windows 默认会把检出时的换行改成 CRLF，导致同一份代码在不同机器上
+# 出现「全文件 diff」。这里显式钉死。
+* text=auto eol=lf
+
+# 二进制文件不做换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+
+# 工作流 JSON / 配置保持 LF
+*.json text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.txt text eol=lf

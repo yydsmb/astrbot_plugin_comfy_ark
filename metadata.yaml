@@ -1,0 +1,66 @@
+name: astrbot_plugin_comfy_ark
+display_name: Comfy豆包通用生图
+short_desc: 本地 ComfyUI 优先、云端豆包 Seedream 兜底的文生图 / 图生图插件，支持人格参考图与内容审查
+desc: |
+  **本地 ComfyUI 优先，云端豆包 Seedream 兜底**的 AstrBot 生图插件，支持文生图与图生图。
+
+  ### 后端三档
+  - `local_first`（默认）：先跑本地 ComfyUI，连不上 / 超时 / 工作流报错时自动转云端兜底
+  - `local_only`：只用本地，不花钱、不需要 API Key
+  - `cloud_only`：只用云端火山方舟
+
+  本地后端不写死节点 ID，而是按连线关系自动识别采样器 / 正负面文本节点 / 尺寸节点 /
+  保存节点；参考图先上传到 ComfyUI 的 input 目录再注入 LoadImage；参考图工作流报错时
+  自动改用纯文本工作流重跑，并在回执里说明本次没用上参考图。
+
+  ### 参考图
+  - 来源：用户消息附图、引用消息里的图、提示词里的图片链接
+  - **人格参考图**：把图片放进插件 `refs/` 目录，文件名 = AI 人格名，插件按当前会话人格
+    自动取图；名字对不上时可用 `reference_alias_map` 写一行 `人格名=文件名` 映射
+  - **由 AI 自己在对话里判断该不该用参考图**，用户也可用 `/图生图`、`/文生图` 强制
+  - 一套提示词喂两个后端：本地 Qwen 保留 `<imageN>` 槽位，云端 Seedream 自动翻译成自然语言；
+    引用了本次不存在的图的句子会被按句摘掉，并如实回报
+
+  ### 内容审查
+  本地出图没有上游审核，插件自己挡两道：**生成前查提示词、生成后查图片**，
+  命中 R18 直接拦截不发。识图模型由 `moderation_provider_id` 指定（`/画图审查` 可看列表）。
+
+  ### 其他
+  - 云端默认模型 `doubao-seedream-5-0-flash-260915`（0.12 元/张，全系最低，输入图免费），
+    可在配置里换成任意在售的 Seedream 模型
+  - 模型能力表：尺寸 / 格式 / 组图 / 联网搜索按所选模型自动降级；模型未开通时自动回退到备用模型
+  - 省钱护栏：成本估算、每人每日张数上限（只对云端生效）、同图缓存
+  - 指令：`/画图` `/生图` `/图生图` `/文生图` `/画图参考` `/画图诊断` `/画图审查`
+  - LLM 工具：`comfy_ark_generate_image`
+
+  ### 安装
+  在 AstrBot WebUI 的插件市场搜索 **Comfy豆包通用生图** 安装，或把本仓库放进
+  `data/plugins/astrbot_plugin_comfy_ark/` 后重启。
+
+  本地 ComfyUI 需要导出 **API 格式**的工作流 JSON（插件已自带 Qwen Image 2.1 的文生图与
+  参考图两个工作流，可在配置里换成自己的）。
+  ### 许可证
+  [MIT License](https://opensource.org/license/mit)。可自由使用、修改、分发（含商用），保留版权与许可声明即可。
+  完整条款见仓库根目录 `LICENSE`。
+
+version: 3.0.0
+author: 橙橘
+astrbot_version: ">=4.17.0"
+repo: https://github.com/yydsmb/astrbot_plugin_comfy_ark
+tags:
+  - 生图
+  - 图像生成
+  - 图生图
+  - ComfyUI
+  - 豆包
+  - Seedream
+  - image
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - telegram
+  - wecom
+  - lark
+  - dingtalk
+  - discord
+  - slack

@@ -1,0 +1,362 @@
+{
+  "backend": {
+    "description": "生图后端。local_first = 本地 ComfyUI 优先、失败自动走云端兜底（默认）；local_only = 只用本地，一次都不碰云端（api_key 可以留空）；cloud_only = 只用云端火山方舟（等同于 v1.x 的老行为）。",
+    "type": "string",
+    "hint": "本地跑不要钱、也不要 Key，但需要本机开着 ComfyUI 且装好工作流所需的节点/模型；云端要钱但 7×24 可用。两者都开（local_first）最稳：本地挂了不会让用户空手而归。",
+    "default": "local_first",
+    "options": [
+      "local_first",
+      "local_only",
+      "cloud_only"
+    ]
+  },
+  "comfyui_url": {
+    "description": "本地 ComfyUI 的地址。",
+    "type": "string",
+    "hint": "默认 http://127.0.0.1:8188（ComfyUI 默认端口）。Comfy Desktop 也是这个端口。可以只填 127.0.0.1:8188，插件会自动补 http://；填了 /prompt 之类的后缀也会被自动去掉。ComfyUI 跑在别的机器/容器里时填它的实际地址。",
+    "default": "http://127.0.0.1:8188",
+    "obvious_hint": true
+  },
+  "comfyui_timeout": {
+    "description": "本地单次生成的等待上限（秒）。超时按失败处理（local_first 会转云端兜底）。",
+    "type": "float",
+    "hint": "实测本机 Qwen Image 2.1：文生图约 1.6 秒（模型已缓存），参考图工作流约 39 秒（首次要加载模型，可能到 1~2 分钟）。默认 600 秒足够。",
+    "default": 600
+  },
+  "comfyui_poll_interval": {
+    "description": "轮询 ComfyUI 任务进度的间隔（秒）。",
+    "type": "float",
+    "hint": "ComfyUI 的 HTTP API 没有 websocket 推送，只能轮询 /history。默认 3 秒；调小会更早拿到结果但更费 CPU。",
+    "default": 3
+  },
+  "comfyui_width": {
+    "description": "本地文生图的宽度（像素）。",
+    "type": "int",
+    "hint": "Qwen Image 2.1 建议 1024 左右；显存小（8GB）时别超过 1536。注意：如果工作流是「按参考图尺寸出图」那种（latent 由文本编码器给），本项只在纯文生图时生效。",
+    "default": 1024
+  },
+  "comfyui_height": {
+    "description": "本地文生图的高度（像素）。",
+    "type": "int",
+    "hint": "同 comfyui_width。",
+    "default": 1024
+  },
+  "comfyui_resolution": {
+    "description": "Qwen Image 2.1 的 resolution 参数：参考图会被缩放到约 resolution×resolution 再进入模型。填 0 = 保持参考图原尺寸。",
+    "type": "int",
+    "hint": "取值应为 32 的倍数、上限 4096。默认 1024。参考图很小又想要细节时可以调大到 1536 / 2048，但显存占用和耗时都会上升。",
+    "default": 1024
+  },
+  "comfyui_steps": {
+    "description": "采样步数。",
+    "type": "int",
+    "hint": "Qwen Image 2.1 官方推荐 25。调高更细但线性变慢；低于 15 出图容易糊。",
+    "default": 25
+  },
+  "comfyui_negative_prompt": {
+    "description": "本地工作流的负面提示词（写进 TextEncode 节点的 negative_prompt）。留空表示不改工作流里的原值。",
+    "type": "text",
+    "hint": "Qwen Image 2.1 的 cfg 是 1（不启用分类器引导），所以负面提示词实际影响很小，留空即可。",
+    "default": ""
+  },
+  "comfyui_ref_fallback_text": {
+    "description": "参考图工作流失败时，是否自动改用纯文本工作流重新生成一张。",
+    "type": "bool",
+    "hint": "建议保持 true。参考图工作流最常见的失败原因是「工作流被改动后连线类型对不上」或「没装 LoadImage 依赖的节点」；此时插件会改用文生图重跑，并在图片下方说明本次没用上参考图，而不是直接把错误甩给用户。",
+    "default": true
+  },
+  "comfyui_t2i_workflow": {
+    "description": "本地「文生图」工作流的 JSON 文件路径（API 格式）。留空 = 用插件自带的 qwen_t2i.json。",
+    "type": "string",
+    "hint": "必须是 ComfyUI「导出（API）」得到的 JSON —— 顶层形如 {\"1\": {\"inputs\": {...}, \"class_type\": ...}}；带 nodes/links 的 UI 格式用不了。插件不写死节点 ID，而是按连线关系自动认出采样器、正/负面文本节点、尺寸节点和保存节点，所以换工作流一般不用改配置。",
+    "default": ""
+  },
+  "comfyui_ref_workflow": {
+    "description": "本地「参考图」工作流（图生图）的 JSON 文件路径（API 格式）。留空 = 用插件自带的 qwen_ref.json。",
+    "type": "string",
+    "hint": "同样是 API 格式。插件会自动找到 LoadImage 节点并把它接进文本编码器，把用户提供的参考图上传后填进去。",
+    "default": ""
+  },
+  "api_key": {
+    "description": "火山方舟（Volcano Ark）API Key，用于云端兜底生图。backend = local_only 时可以留空。",
+    "type": "string",
+    "hint": "在火山方舟控制台「API Key 管理」获取长效 Key。请勿泄露。",
+    "default": "",
+    "obvious_hint": true
+  },
+  "model": {
+    "description": "云端使用的 Seedream 模型。价格从低到高：5.0-flash = 0.12 元/张（**全系最低**，输入图免费，无免费额度）／4.0 = 0.20（送 200 张，想白嫖额度选它）／5.0 与 5.0-lite = 0.22（lite 送 50 张，且需先开通）／4.5 = 0.25（送 200 张）／5.0-pro = 0.30~0.60 且**没有免费额度**。",
+    "type": "string",
+    "hint": "5.0-flash 单价 0.12 元/张（全系最低）、必须先在控制台开通才能用；4.0 单价 0.20 但送 200 张免费额度。⚠️ doubao-seedream-5-0-lite-260128 已在本机实测：模型名合法、但本账号下无法路由到可用接入点（需先到控制台「系统管理 → 开通管理 → 视觉模型」开通）。未开通期间插件会自动改用 fallback_model 出图，不会失败。pro 只在需要最强画质时才用，且务必把 size 设成 1K 或 1.5K（2K 会让单价从 0.30 翻倍到 0.60）。各模型支持的尺寸/格式不同，配置超范围时插件会自动降级，不会报错。",
+    "default": "doubao-seedream-5-0-flash-260915",
+    "options": [
+      "doubao-seedream-5-0-flash-260915",
+      "doubao-seedream-4-0-250828",
+      "doubao-seedream-5-0-lite-260128",
+      "doubao-seedream-5-0-260128",
+      "doubao-seedream-4-5-251128",
+      "doubao-seedream-5-0-pro-260628"
+    ]
+  },
+  "api_url": {
+    "description": "云端生图接口地址。默认是标准端点，一般不用改。",
+    "type": "string",
+    "hint": "只有你持有火山方舟 CodePlan / Agent Plan 时才需要改：填它的专属端点（https://ark.cn-beijing.volces.com/api/plan/v3/images/generations），并把 api_key 换成 plan 专属 Key。此时模型名用「点号」写法，例如 doubao-seedream-5.0-lite。标准 Key 访问 plan 端点会返回 401。",
+    "default": "https://ark.cn-beijing.volces.com/api/v3/images/generations"
+  },
+  "auto_fallback": {
+    "description": "【防踩坑】当所选模型无法路由到可用接入点（典型：5.0-lite 未开通）时，是否自动改用 fallback_model 重新生成一次。",
+    "type": "bool",
+    "hint": "建议保持 true：失败请求不计费，所以这一步不多花钱，但能保证用户不会因为选了个没开通的模型而彻底生不出图。回退结果里会注明实际用的模型。",
+    "default": true
+  },
+  "fallback_model": {
+    "description": "auto_fallback 使用的替代模型。",
+    "type": "string",
+    "hint": "默认 doubao-seedream-4-0-250828（0.20 元/张，附 200 张免费额度）。",
+    "default": "doubao-seedream-4-0-250828"
+  },
+  "size": {
+    "description": "云端生成图片尺寸。1K/1.5K/2K/3K/4K 由模型自行决定具体像素；也可直接填 WxH 精确像素。",
+    "type": "string",
+    "hint": "**只影响 pro 的价格**：pro 在 1K/1.5K 是 0.30 元/张，2K 及以上是 0.60 元/张。换用 4.0 / 4.5 / lite 后，尺寸与价格无关，放心开大。各模型支持范围不同（pro 不支持 3K/4K，lite 不支持 1K，4.5 不支持 1K/3K），超出时自动改用 2K。填 WxH 时官方另有两条硬约束：宽高比必须落在 [1/16, 16]，总像素（宽×高）必须落在模型区间内 —— pro 是 [921600, 4624220]，lite / 4.5 是 [3686400, 16777216]，4.0 是 [921600, 16777216]。不合规时插件会说明原因并改用 2K，不再把上游那句看不懂的 parameter not valid 直接甩给你。",
+    "default": "2K",
+    "options": [
+      "1K",
+      "1.5K",
+      "2K",
+      "3K",
+      "4K",
+      "2048x2048",
+      "2560x1440",
+      "3840x2160"
+    ]
+  },
+  "output_format": {
+    "description": "图片文件格式。注意 4.5 / 4.0 仅支持 jpeg。",
+    "type": "string",
+    "hint": "png 仅 5.0 系列支持；选了 png 但模型只支持 jpeg 时插件会自动改用 jpeg。本地 ComfyUI 出图格式由工作流的保存节点决定，与本项无关。",
+    "default": "jpeg",
+    "options": [
+      "jpeg",
+      "png"
+    ]
+  },
+  "watermark": {
+    "description": "是否在图片上添加「AI 生成」水印（仅云端）。",
+    "type": "bool",
+    "hint": "true 添加水印，false 不添加。接口默认是 true，本插件默认关掉。",
+    "default": false
+  },
+  "web_search": {
+    "description": "是否让云端模型联网搜索后再画图。适合「今天天气怎么样画成插画」「最新款 XX 长什么样」这类时效性提示词。",
+    "type": "bool",
+    "hint": "官方文档明确：联网搜索目前仅 Seedream 5.0 lite 支持，其他模型会被插件自动忽略（不报错）。开启后时延会变长，且会额外增加调用。实际是否搜索由模型按提示词自行判断。",
+    "default": false
+  },
+  "optimize_prompt_mode": {
+    "description": "提示词优化模式。standard = 质量优先（官方默认）；fast = 耗时更短、质量略降。",
+    "type": "string",
+    "hint": "实测 fast 目前仅 5.0 pro 与 4.0 支持；5.0 lite / 4.5 / 5.0-flash 传了会报错（flash 直接回 must be one of: standard）—— 插件会在不支持的模型上自动按 standard 走。standard 本身是服务端默认值，所以只有选 fast 才会真的下发该字段。",
+    "default": "standard",
+    "options": [
+      "standard",
+      "fast"
+    ]
+  },
+  "count": {
+    "description": "一次生成图片数量（组图）。按实际张数计费，count=2 就是两倍价钱。仅 5.0 / 5.0-lite / 4.5 / 4.0 支持大于 1；Pro 与 5.0-flash 会自动降为 1。",
+    "type": "int",
+    "hint": "组图模型总量上限 15（参考图 + 生成图）。想省钱就保持 1。本地 ComfyUI 也按本项张数跑多次。",
+    "default": 1
+  },
+  "seed": {
+    "description": "云端随机种子。固定同一个种子 + 同一提示词可复现同一张图。",
+    "type": "int",
+    "hint": "填 -1 表示每次随机（默认）。本地工作流由工作流自己的 seed 输入控制，插件默认会把它的随机化交给 ComfyUI。",
+    "default": -1
+  },
+  "daily_limit": {
+    "description": "【省钱护栏】每个用户每天最多生成多少张「云端」图，超过直接拒绝。填 0 表示不限制。本地生成不计数、不花钱。",
+    "type": "int",
+    "hint": "按 0.20 元/张算，30 张 ≈ 6 元/人/天。这是防止钱包被刷爆的最后一道闸。",
+    "default": 30
+  },
+  "cache_seconds": {
+    "description": "【省钱护栏】多少秒内、同一个请求（同提示词/同尺寸/同参数）直接复用本地已生成的图，不再调用接口。填 0 关闭。",
+    "type": "int",
+    "hint": "比如填 300：5 分钟内重复发同一句提示词会拿回缓存图（0 元）。想每次都要新图就填 0。本地与云端都会写缓存，但只有云端计费时会记账。",
+    "default": 0
+  },
+  "allow_reference_image": {
+    "description": "是否允许把消息里的图片当作参考图（图生图）。关闭后插件只会文生图。",
+    "type": "bool",
+    "hint": "true（默认）= 带图就图生图、不带图就文生图，由用户自己选择；false = 完全忽略消息中的图片。云端参考图输入对 4.0 / 4.5 / lite 免费，pro 则收 0.02 元/张（首张免费）。",
+    "default": true
+  },
+  "reference_transport": {
+    "description": "参考图传给火山方舟的方式（仅云端）。base64 = 插件先下载/读取再编码上传（兼容性最好）；url = 直接把图片链接交给方舟抓取（更省流量，仅图片链接公开可访问时可用）。",
+    "type": "string",
+    "hint": "QQ / 微信下发的图片链接通常带鉴权，方舟抓不到，建议保持 base64。传给本地 ComfyUI 的方式固定是「先上传到 ComfyUI 的 input 目录」，与本项无关。",
+    "default": "base64",
+    "options": [
+      "base64",
+      "url"
+    ]
+  },
+  "max_reference_images": {
+    "description": "单次最多使用几张参考图。",
+    "type": "int",
+    "hint": "建议 1~4。上限按模型区分（实测）：5.0 pro 与 5.0 flash 最多 10 张，5.0 lite / 4.5 / 4.0 最多 14 张；插件会再按当前模型裁一次，超出部分忽略并在结果里注明。另外官方规定「参考图张数 + 生成张数 ≤ 15」。本地工作流目前只吃第一张参考图。",
+    "default": 4
+  },
+  "max_reference_mb": {
+    "description": "单张参考图的体积上限（MB）。超过的参考图会被跳过。",
+    "type": "float",
+    "hint": "官方单图上限 30MB，这里默认 8MB 留足余量（聊天场景的图基本到不了这么大）。",
+    "default": 8
+  },
+  "default_reference_prompt": {
+    "description": "图生图时若用户没有给提示词，使用的兜底提示词。",
+    "type": "text",
+    "hint": "接口要求 prompt 必填，所以图生图也必须有一句描述。",
+    "default": "以参考图为基础，保持主体特征与构图一致，生成一张更高质量的图片"
+  },
+  "persona_reference_enabled": {
+    "description": "【人格参考图】是否允许 AI 用「当前人格」的参考图。图片由用户提前放进参考图目录，文件名 = 人格名。",
+    "type": "bool",
+    "hint": "开启后 AI 可以在参考图与消息附图之间自己挑（也可以都不用）。发 /画图参考 能看到目录现状和哪个人格还没图。",
+    "default": true
+  },
+  "reference_dir": {
+    "description": "人格参考图存放目录。留空 = 插件目录下的 refs/。",
+    "type": "string",
+    "hint": "文件名（不含扩展名）就是人格名，例如人格叫「橙橘」就放 橙橘.png。目录不存在时插件会提示你手动创建。",
+    "default": ""
+  },
+  "reference_priority": {
+    "description": "AI 未指定用哪种参考图（reference_source=auto）时，优先用哪一个。",
+    "type": "string",
+    "hint": "persona = 人格图优先（默认）；message = 消息附图优先。两者只影响「自动」模式 —— AI 在对话里也可以明确指定只用其中一种、或者完全不用参考图。",
+    "default": "persona",
+    "options": [
+      "persona",
+      "message"
+    ]
+  },
+  "reference_alias_map": {
+    "description": "人格名与参考图文件名的映射（名字对不上时才需要）。一行一条，写成「人格名=文件名」。",
+    "type": "text",
+    "hint": "例如：\n橙橘=orange.png\n小深=小深酱.png\n支持 = / ＝ / : / ： 作为分隔符，# 或 // 开头的行会被忽略。匹配时会忽略空格、下划线、连字符，所以「小 深」和「小深」本来就能对上，只有真正改名了才需要写这里。",
+    "default": ""
+  },
+  "persona_name_default": {
+    "description": "取不到会话人格时的兜底人格名。留空 = 不兜底。",
+    "type": "string",
+    "hint": "插件优先读「当前会话绑定的人格」，读不到才读「默认人格」，都拿不到时用本项。适合服务器上没配人格、但你想固定用某张参考图的场景。",
+    "default": ""
+  },
+  "prompt_guide_enabled": {
+    "description": "【提示词层】把「生图前自查」（选哪个参考图来源 + prompt 里禁止写外貌）注入 system_prompt。",
+    "type": "bool",
+    "hint": "开启后，只要本轮对话能用生图工具，插件就会往系统提示词尾部追加一段（约 550 字符，含「当前生效人格是谁、有没有参考图」这两个实时事实）。模型正是看不到这两个事实才会保守地选 none，于是画出来的人不像。完整模板与示例放在工具说明里，不占这里。若与某个人格提示词冲突，可以关掉。",
+    "default": true
+  },
+  "moderation_enabled": {
+    "description": "【内容审查】是否开启审查。本地 ComfyUI 没有上游审核，必须靠这一道挡住 R18 内容。",
+    "type": "bool",
+    "hint": "⚠️ 关掉后本地生成会无审核直出。云端生成本身有火山方舟的上游审核，所以本地优先的场景下这一项是关键防线。审查用的是你已在 AstrBot 里配好的对话模型（视模型能力，最好选支持图片输入的）。",
+    "default": true,
+    "obvious_hint": true
+  },
+  "moderation_provider_id": {
+    "description": "【内容审查】用哪个模型来判 R18。填 AstrBot「服务提供商」里的 Provider ID。留空 = 用当前会话的默认对话模型。",
+    "type": "string",
+    "hint": "发 /画图审查 会列出所有可用的 Provider ID，直接抄一个填进来。⚠️ 必须选一个**支持图片输入**的多模态模型，否则「生成后查图片」那一步会失败（失败按 moderation_fail_open 处理）。",
+    "default": ""
+  },
+  "moderation_check_prompt": {
+    "description": "【内容审查】生成之前，先让审查模型判断提示词是否属于 R18。",
+    "type": "bool",
+    "hint": "建议开启：能在花钱/占用显卡之前就把违规请求拦掉。审查模型拿不准时的处理方式见 moderation_strict。",
+    "default": true
+  },
+  "moderation_check_image": {
+    "description": "【内容审查】生成之后，让审查模型看一眼出图，命中 R18 就拦截不发。",
+    "type": "bool",
+    "hint": "建议开启。本地生成的图是直接落在磁盘上的，插件会把文件喂给审查模型。需要 moderation_provider_id（或会话默认模型）本身支持图片输入。",
+    "default": true
+  },
+  "moderation_strict": {
+    "description": "【内容审查】审查模型拿不准时说「不确定」时的处理方式。false = 按安全放行（默认）；true = 按不安全拦截。",
+    "type": "bool",
+    "hint": "默认宽松，避免把正常的插画误杀。对内容把控要求严格时改成 true。注意：这只影响「模型明确表示拿不准」的情况，模型明确判 UNSAFE 时一律拦截。",
+    "default": false
+  },
+  "moderation_fail_open": {
+    "description": "【内容审查】审查模型调用失败（网络错误、模型不支持图片、返回看不懂）时的处理方式。true = 放行（默认）；false = 拦截。",
+    "type": "bool",
+    "hint": "默认放行，是为了避免「审核模型一挂、生图功能整个不可用」。如果你更在意合规、宁可生不出图也不能漏，就改成 false。",
+    "default": true
+  },
+  "moderation_timeout": {
+    "description": "【内容审查】单次审查的等待上限（秒）。超时按「审查失败」处理。",
+    "type": "float",
+    "hint": "审查跑一次通常几秒。默认 60 秒；查图片时会放大图，慢一点的模型也够用。",
+    "default": 60
+  },
+  "moderation_prompt_max_chars": {
+    "description": "【内容审查】送审的提示词最多截取多少字符。",
+    "type": "int",
+    "hint": "防止有人用超长提示词把审查模型带偏或拖慢（默认 2000）。只影响送审的那一份副本，不影响真正拿去生图的提示词。",
+    "default": 2000
+  },
+  "prompt_prefix": {
+    "description": "自动加在每条提示词前面的前缀（可留空）。",
+    "type": "string",
+    "hint": "例如统一加「超写实摄影，8K，电影质感，」",
+    "default": ""
+  },
+  "prompt_suffix": {
+    "description": "自动加在每条提示词后面的后缀（可留空）。",
+    "type": "string",
+    "hint": "例如统一加「，柔光，浅景深」",
+    "default": ""
+  },
+  "show_prompt": {
+    "description": "是否在图片下方附带本次使用的提示词。",
+    "type": "bool",
+    "hint": "true 会在图片下方显示「提示词：...」。false 则只发图。",
+    "default": false
+  },
+  "success_text": {
+    "description": "show_prompt 为 false 时，是否额外发一条简短回执。留空表示「只发图、不发任何文字」。",
+    "type": "string",
+    "hint": "例如填「✅ 已生成」就会在图片后额外发这条。留空 = 完全静默。",
+    "default": ""
+  },
+  "download_locally": {
+    "description": "是否先把云端生成的图片下载到本地再发送。关闭则直接发送远程 URL（部分平台可能不支持）。",
+    "type": "bool",
+    "hint": "建议保持开启，兼容性最好（也是同图缓存能生效的前提）。本地 ComfyUI 的图本来就在本地，不受本项影响。",
+    "default": true
+  },
+  "rate_limit_seconds": {
+    "description": "同一用户两次生成之间的最小间隔（秒），防止刷屏。",
+    "type": "int",
+    "hint": "设为 0 可关闭限流。",
+    "default": 8
+  },
+  "max_concurrent": {
+    "description": "同时进行的生图任务上限（全局）。",
+    "type": "int",
+    "hint": "不建议超过 3，容易触发上游限流。本地 ComfyUI 本身就是串行队列，开太大只会让请求堆在 ComfyUI 里排队。",
+    "default": 2
+  },
+  "retry_times": {
+    "description": "云端网络类错误（超时、连接失败）的重试次数。",
+    "type": "int",
+    "hint": "接口返回的业务错误（如 Key 无效、账户欠费）不会重试；若报错点是某个可选参数，插件会自动剔除该参数重试一次。",
+    "default": 1
+  }
+}

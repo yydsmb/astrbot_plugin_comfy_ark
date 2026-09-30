@@ -1,0 +1,25 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- 运行时产物 ----
+*.log
+data/
+cache/
+
+# ---- 关键：私人参考图绝不进仓库 ----
+# refs/ 里放的是「人格名 = 文件名」的私人角色图，只保留说明文件
+refs/*
+!refs/README.txt
+
+# ---- 本地自定义工作流（自带的两个 workflows/*.json 要保留）----
+workflows/local_*.json
