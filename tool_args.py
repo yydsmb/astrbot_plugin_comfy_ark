@@ -41,6 +41,9 @@ from typing import Any
 CANONICAL_REF_PARAM = "reference_source"
 # v3.1.0：让模型自己挑本地工作流。云端后端不区分工作流，这个参数只对本地生效。
 CANONICAL_WORKFLOW_PARAM = "workflow"
+# 负面提示词。**必须单独走参数**：ComfyUI 的文本编码器只认纯文本，没有
+# `--no xxx` 这种语法；写在 prompt 里会被当成正面描述（实测踩过）。
+CANONICAL_NEG_PARAM = "negative_prompt"
 
 REF_SOURCE_VALUES = ("auto", "persona", "message", "none")
 
@@ -49,6 +52,7 @@ REAL_PARAMS = (
     "prompt",
     CANONICAL_REF_PARAM,
     CANONICAL_WORKFLOW_PARAM,
+    CANONICAL_NEG_PARAM,
     "size",
     "count",
 )
@@ -137,6 +141,28 @@ _CANON_WF_NORM = _norm_key(CANONICAL_WORKFLOW_PARAM)
 _WF_RANK: dict[str, int] = {}
 for _i, _name in enumerate(_WF_ORDER):
     _WF_RANK.setdefault(_name, _i)
+
+# 负面提示词类参数名。取值是自由文本，不做映射（只有参数名要认）。
+NEG_PARAM_ALIASES: tuple[str, ...] = (
+    CANONICAL_NEG_PARAM,
+    "negative",
+    "neg_prompt",
+    "negprompt",
+    "negative_text",
+    "avoid",
+    "avoid_prompt",
+    "exclude",
+    "forbidden",
+    "负面提示词",
+    "负面",
+)
+
+_NEG_ORDER: tuple[str, ...] = tuple(_norm_key(a) for a in NEG_PARAM_ALIASES)
+_NEG_NORMS = frozenset(_NEG_ORDER)
+_CANON_NEG_NORM = _norm_key(CANONICAL_NEG_PARAM)
+_NEG_RANK: dict[str, int] = {}
+for _i, _name in enumerate(_NEG_ORDER):
+    _NEG_RANK.setdefault(_name, _i)
 
 
 # ----------------------------------------------------------------------
@@ -368,6 +394,15 @@ class NormalizedArgs:
     ignored_workflow_params: list[str] = field(default_factory=list)
     """因为规范名已存在而被忽略的工作流别名。"""
 
+    negative: str = ""
+    """最终采用的负面提示词（空 = 模型没给）。取值不做映射，就是一段文本。"""
+
+    negative_param: str = ""
+    """实际被采纳的负面参数名（保留模型的原始写法）。"""
+
+    ignored_negative_params: list[str] = field(default_factory=list)
+    """因为规范名已存在而被忽略的负面参数别名。"""
+
     @property
     def coerced(self) -> bool:
         """是否发生过「参数名或取值」的翻译。"""
@@ -385,6 +420,13 @@ class NormalizedArgs:
         return _norm_key(self.workflow_param) != _CANON_WF_NORM
 
     @property
+    def negative_coerced(self) -> bool:
+        """负面提示词参数名被翻译过吗。"""
+        if not self.negative_param:
+            return False
+        return _norm_key(self.negative_param) != _CANON_NEG_NORM
+
+    @property
     def has_news(self) -> bool:
         """有没有需要说出来的事。"""
         return bool(
@@ -394,6 +436,8 @@ class NormalizedArgs:
             or self.unknown_params
             or self.workflow_coerced
             or self.ignored_workflow_params
+            or self.negative_coerced
+            or self.ignored_negative_params
         )
 
 
@@ -451,13 +495,26 @@ def normalize_tool_args(
         norm.workflow = coerce_str(norm.workflow_raw).strip()
         norm.ignored_workflow_params = [k for k in wf_present if k != pick_wf]
 
-    # 3) 未知参数：既不在真实参数表里，也不是参考图 / 工作流类的别名
+    # 2.6) 负面提示词：只认参数名，取值是自由文本
+    neg_present: list[str] = []
+    for key in args:
+        if _norm_key(key) in _NEG_NORMS and key not in neg_present:
+            neg_present.append(key)
+    neg_present.sort(key=lambda k: _NEG_RANK.get(_norm_key(k), len(_NEG_ORDER)))
+    if neg_present:
+        pick_neg = neg_present[0]
+        norm.negative_param = pick_neg
+        norm.negative = coerce_str(args[pick_neg]).strip()
+        norm.ignored_negative_params = [k for k in neg_present if k != pick_neg]
+
+    # 3) 未知参数：既不在真实参数表里，也不是上面这些已知别名
     norm.unknown_params = [
         str(k)
         for k in args
         if k not in known_set
         and _norm_key(k) not in _ALIAS_NORMS
         and _norm_key(k) not in _WF_NORMS
+        and _norm_key(k) not in _NEG_NORMS
     ]
 
     return norm
@@ -507,6 +564,17 @@ def describe_arg_fixes(norm: NormalizedArgs) -> tuple[str, str]:
             + "、".join(norm.ignored_workflow_params)
             + " 已被忽略（工作流参数只认一个）"
         )
+    if norm.negative_coerced:
+        llm_bits.append(
+            f"你传的是 {norm.negative_param}={_short(norm.negative)}，"
+            "插件已理解为 negative_prompt"
+        )
+    if norm.ignored_negative_params:
+        llm_bits.append(
+            "同时出现的 "
+            + "、".join(norm.ignored_negative_params)
+            + " 已被忽略（负面提示词只认一个）"
+        )
     if norm.unknown_params:
         names = "、".join(norm.unknown_params)
         llm_bits.append(f"参数 {names} 本工具没有，已忽略")
@@ -517,7 +585,9 @@ def describe_arg_fixes(norm: NormalizedArgs) -> tuple[str, str]:
         "\n（工具参数提示："
         + "；".join(llm_bits)
         + f"。本工具的参数只有 {params_zh}，参考图一律用 {CANONICAL_REF_PARAM}，"
-        f"工作流一律用 {CANONICAL_WORKFLOW_PARAM}，不要自己另起名字。）"
+        f"工作流一律用 {CANONICAL_WORKFLOW_PARAM}，"
+        f"负面提示词一律用 {CANONICAL_NEG_PARAM}"
+        "（**不要写 --no，我们的后端不认这个语法**），不要自己另起名字。）"
     )
     user_tip = "（" + "；".join(user_bits) + "）" if user_bits else ""
     return llm_tip, user_tip

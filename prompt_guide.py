@@ -21,11 +21,15 @@ SYSTEM_HEADER = "【生图前自查 · 调用 comfy_ark_generate_image 前必须
 
 # 决策规则正文（不含动态事实行）。
 SYSTEM_RULES = """一、判断 reference_source
-· 画面主体是「你 / AI / 当前人格」（自己、自拍、全身、半身、立绘、换装、再拍一张、换个姿势、你现在的样子）→ "persona"
+· 画面主体是「你 / AI / 当前人格」（自己、自拍、全身、半身、局部特写、拍腿、
+  拍手、拍任何部位、立绘、换装、再拍一张、换个姿势、你现在的样子）→ "persona"
 · 用户带了图，要求照着改 → "message"
 · 画面里没有你、也没给图 → "none"
 · 同时出现「画你」和「用户图」→ 主体优先，选 "persona"，用户图作为换装/背景来源
 · 拿不准 → 不传参数，插件 auto
+铁律：只要画面里是你自己 —— 哪怕只是拍腿、拍手这种没有脸的局部 —— 也必须传
+"persona"，**严禁**传 "none"。参考图负责提供服装与身体比例，模型自己知道
+该取哪一部分。只有画一个完全无关的人或物体时，才用 "none"。
 
 二、写 prompt
 有参考图时，只描述「要变的东西」，不描述「要保留的身份」。
@@ -34,11 +38,21 @@ SYSTEM_RULES = """一、判断 reference_source
 可替换变量：新场景、新动作、构图（全身/半身/自拍/特写/头像）、新服装。
 服装可以换：AI 可根据场景、情绪、剧情自主判断（如洗澡、睡觉、出舱、节日），不必等用户明说。
 换装时只描述服装，禁止顺带描述脸和发型。
+没有脸的构图（拍腿 / 拍手 / 局部）→ prompt 里写「局部特写」「第一人称视角」
+把范围框住；想排除脸部用 negative_prompt 参数写「脸部, 眼睛」，不要写进 prompt。
 
-三、调用前自检
-1. 画「你」是否走了 persona？
+三、要排除的东西一律走 negative_prompt
+负面词写在 negative_prompt 参数里（逗号分隔），**绝对不要**写成
+`prompt + " --no xxx"` —— 本地后端是 ComfyUI 的文本编码器，只认纯文本，
+不认 --no 语法（那是某些前端自己的糖）。写进 prompt 会被当成正面描述，
+等于主动要求模型把那些东西画出来。
+常用：多余的头, 悬浮的头, 畸形, 糟糕的透视, 多手多脚, 水印, 文字, 分格, 多个角色。
+
+四、调用前自检
+1. 画「你」是否走了 persona？（含只拍腿部 / 手部这种没有脸的局部）
 2. prompt 里是否出现了脸型、发色、瞳色、五官词？出现就删。
-3. 是否明确写了「保留 <image1> 中的脸型和发型」？"""
+3. 是否明确写了「保留 <image1> 中的脸型和发型」？
+4. 要排除的内容是否写进了 negative_prompt，而不是写成 prompt 里的 --no？"""
 
 
 def build_fact_line(
@@ -91,7 +105,7 @@ def _candidate_hint(candidates: list[str] | None, suggestion: str) -> str:
 
 
 # 工作流那一节的标题（接在 SYSTEM_RULES 的「三、调用前自检」之后）
-WORKFLOW_HEADER = "四、选工作流（只对本地 ComfyUI 生效，云端不区分）"
+WORKFLOW_HEADER = "五、选工作流（只对本地 ComfyUI 生效，云端不区分）"
 
 
 def build_workflow_section(menu_text: str, local_available: bool = True) -> str:
@@ -112,6 +126,9 @@ def build_workflow_section(menu_text: str, local_available: bool = True) -> str:
     )
 
 
+EXTRA_HEADER = "【插件配置里的额外设定】"
+
+
 def build_system_block(
     persona_name: str = "",
     ref_filename: str = "",
@@ -119,8 +136,13 @@ def build_system_block(
     suggestion: str = "",
     workflow_menu: str = "",
     local_available: bool = True,
+    extra: str = "",
 ) -> str:
-    """拼完整的一段（含动态事实）。"""
+    """拼完整的一段（含动态事实）。
+
+    ``extra`` = 用户在配置里自己填的补充设定（角色外貌、画风偏好…），原样附在
+    末尾。插件刻意不内置任何具体角色 —— 那是部署方的事，写死了对别人就是噪声。
+    """
     fact = build_fact_line(
         persona_name=persona_name,
         ref_filename=ref_filename,
@@ -131,6 +153,8 @@ def build_system_block(
     section = build_workflow_section(workflow_menu, local_available)
     if section:
         parts.append(section)
+    if (extra or "").strip():
+        parts.append(f"{EXTRA_HEADER}\n{extra.strip()}")
     return "\n".join(parts)
 
 

@@ -269,6 +269,7 @@ from .slot_tokens import (
     adapt_slots,
 )
 from .tool_args import (
+    CANONICAL_NEG_PARAM,
     CANONICAL_REF_PARAM,
     CANONICAL_WORKFLOW_PARAM,
     REAL_PARAMS,
@@ -286,7 +287,7 @@ from .workflows import (
 )
 
 PLUGIN_NAME = "astrbot_plugin_comfy_ark"
-PLUGIN_VERSION = "3.1.0"
+PLUGIN_VERSION = "3.2.0"
 API_URL = "https://ark.cn-beijing.volces.com/api/v3/images/generations"
 # Agent Plan / CodePlan 专属端点：模型名用「点号」形式（doubao-seedream-5.0-lite），
 # 且必须配套 plan 专属 API Key；拿普通 Key 访问会返回 401 AuthenticationError。
@@ -938,6 +939,9 @@ class ComfyArkImagePlugin(Star):
         # v2.0.3 提示词层：把「生图前自查」注入 system_prompt。
         # 注入路径每条消息都要跑，而解析人格要读库，所以带一层 30 秒缓存。
         self.prompt_guide_enabled = bool(cfg.get("prompt_guide_enabled", True))
+        # 用户自己填的补充设定（角色外貌特征、画风偏好…）。插件不内置任何具体
+        # 角色 —— 那是部署方的事，写死了对别的用户就是噪声。这里只负责原样注入。
+        self.prompt_guide_extra = str(cfg.get("prompt_guide_extra") or "").strip()
         self._guide_cache: dict[str, Any] = {}
         self.moderation_check_image = bool(cfg.get("moderation_check_image", True))
         # 拿不准时按不安全处理（严格）；默认宽松，避免误杀正常图
@@ -2089,6 +2093,7 @@ class ComfyArkImagePlugin(Star):
             suggestion=suggestion,
             workflow_menu=menu,
             local_available=local_ok,
+            extra=self.prompt_guide_extra,
         )
         self._guide_cache[umo] = (now, block)
         if len(self._guide_cache) > 200:  # 简单限长，别随会话数无限涨
@@ -2462,10 +2467,12 @@ class ComfyArkImagePlugin(Star):
         ref_local_path: str | None,
         count: int,
         entry: WorkflowEntry | None = None,
+        negative: str = "",
     ) -> tuple[list[str], list[str]]:
         """跑一次本地工作流，返回 (图片URL列表, 说明列表)。
 
         entry 非空 = 跑清单里模型挑的那套预设；为空 = 跑插件自带的兜底工作流。
+        negative = 模型这次点名要排除的内容，**追加**在工作流自带的负面词后面。
         """
         if entry is not None:
             wf, spec, err = self._entry_info(entry)
@@ -2491,11 +2498,30 @@ class ComfyArkImagePlugin(Star):
         # 带 batch_size 字段的工作流才谈得上一次出多张（那些靠 EmptyLatentImage
         # 出画布的）；画布跟着参考图走的没有这个字段。
         batch = count if spec.batch_field else None
+
+        # 负面提示词**三段追加**，不覆盖：工作流自带的 + 配置里的 + 模型这次给的。
+        # 覆盖会把精准版自带的那串基础护栏（low quality / bad anatomy / watermark…）
+        # 整段删掉，那是它调好的参数，不该被一次性的补充说明顶掉。
+        # 两边都没给就**完全不动**工作流 —— 保留它的原值，连末尾换行都不碰。
+        neg_final = None
+        if negative.strip() or self.comfy_negative:
+            neg_parts: list[str] = []
+            if spec.negative_field:
+                _neg_node = wf.get(spec.negative_node) or {}
+                _cur = (_neg_node.get("inputs") or {}).get(spec.negative_field)
+                if isinstance(_cur, str) and _cur.strip():
+                    neg_parts.append(_cur.strip())
+            if self.comfy_negative:
+                neg_parts.append(self.comfy_negative)
+            if negative.strip():
+                neg_parts.append(negative.strip())
+            neg_final = ", ".join(neg_parts)
+
         new_wf, apply_notes = apply_params(
             wf,
             spec,
             prompt=prompt,
-            negative_prompt=self.comfy_negative or None,
+            negative_prompt=neg_final,
             seed=seed,
             # steps=None = 不覆盖，沿用工作流 JSON 自带的值（精准版 35 / 美感版 25）
             steps=self.comfy_steps or None,
@@ -2529,6 +2555,7 @@ class ComfyArkImagePlugin(Star):
         ref_local_path: str | None,
         count: int,
         workflow: str = "",
+        negative: str = "",
     ) -> tuple[list[str], list[str]]:
         """本地生成。工作流选择 + 「参考图工作流失败 → 退回纯文本」的降级。
 
@@ -2542,7 +2569,12 @@ class ComfyArkImagePlugin(Star):
         if ref_local_path:
             try:
                 urls, notes = await self._run_local_workflow(
-                    KIND_REF, prompt, ref_local_path, count, entry=entry
+                    KIND_REF,
+                    prompt,
+                    ref_local_path,
+                    count,
+                    entry=entry,
+                    negative=negative,
                 )
                 return urls, extra + notes
             except Exception as e:
@@ -2554,7 +2586,12 @@ class ComfyArkImagePlugin(Star):
                 # 重来时已经不带参考图了，也就不该再点名那套参考图工作流
                 t2i_entry, _n = self._pick_local_workflow(workflow, need_ref=False)
                 urls, notes = await self._run_local_workflow(
-                    KIND_T2I, prompt, None, count, entry=t2i_entry
+                    KIND_T2I,
+                    prompt,
+                    None,
+                    count,
+                    entry=t2i_entry,
+                    negative=negative,
                 )
                 notes.insert(
                     0,
@@ -2564,7 +2601,7 @@ class ComfyArkImagePlugin(Star):
                 return urls, extra + notes
 
         urls, notes = await self._run_local_workflow(
-            KIND_T2I, prompt, None, count, entry=entry
+            KIND_T2I, prompt, None, count, entry=entry, negative=negative
         )
         return urls, extra + notes
 
@@ -2812,6 +2849,7 @@ class ComfyArkImagePlugin(Star):
         count: int | None = None,
         ref_source: str = REF_SOURCE_AUTO,
         workflow: str = "",
+        negative: str = "",
         arg_llm_tip: str = "",
         arg_user_tip: str = "",
     ) -> tuple[bool, str, str]:
@@ -2820,6 +2858,7 @@ class ComfyArkImagePlugin(Star):
         mode: auto（自动判断）/ text（强制文生图）/ image（强制图生图）
         ref_source: auto / persona / message / none —— 参考图从哪来
         workflow: 本地工作流名（清单里的那个），留空 = 插件按需求自己挑
+        negative: 要排除的内容（逗号分隔），仅本地 ComfyUI 生效
         arg_llm_tip / arg_user_tip: 「工具参数容错层」的说明文本。只有 LLM 工具入口
             会传；指令入口不传。调用方与用户都收不到时留空（= 参数一切正常）。
 
@@ -2828,8 +2867,18 @@ class ComfyArkImagePlugin(Star):
         if ref_source not in REF_SOURCES:
             ref_source = REF_SOURCE_AUTO
         try:
+            # 可选参数一律**关键字**传：按位置传的话，桩函数只要没跟上新参数
+            # 就会 TypeError，而这个异常会被下面的 except 吞掉，表现为
+            # 「静默走了别的路径」，极难排查（实测踩过两次）。
             ok, llm, user = await self._run_generate(
-                event, prompt, mode, size, count, ref_source, workflow
+                event,
+                prompt,
+                mode,
+                size,
+                count,
+                ref_source=ref_source,
+                workflow=workflow,
+                negative=negative,
             )
         except Exception as e:
             logger.error(f"[{PLUGIN_NAME}] 生图异常：{e}", exc_info=True)
@@ -2851,6 +2900,7 @@ class ComfyArkImagePlugin(Star):
         count: int | None,
         ref_source: str = REF_SOURCE_AUTO,
         workflow: str = "",
+        negative: str = "",
     ) -> tuple[bool, str, str]:
         # v2.0.0：api_key 不再是硬门槛 —— backend=local_only 时纯本地跑，不需要 Key。
         # 真正需要 Key 的那一步（调云端）会自己再检查一次。
@@ -3070,7 +3120,11 @@ class ComfyArkImagePlugin(Star):
                 )
                 async with self._sem:
                     urls, local_notes = await self._generate_local(
-                        local_prompt, local_ref, effective, workflow=workflow
+                        local_prompt,
+                        local_ref,
+                        effective,
+                        workflow=workflow,
+                        negative=negative,
                     )
                 used_backend = BACKEND_LOCAL
                 note += "".join(local_notes)
@@ -3600,6 +3654,7 @@ class ComfyArkImagePlugin(Star):
         prompt: str = "",
         reference_source: str | None = None,
         workflow: str | None = None,
+        negative_prompt: str | None = None,
         size: str = None,
         count: int = None,
         **kwargs,
@@ -3681,6 +3736,17 @@ class ComfyArkImagePlugin(Star):
         · 拿不准就**不要传**，让插件自己挑。
 
         ============================================================
+        第四步：要排除的东西走 negative_prompt，绝不要写 `--no`
+        ============================================================
+        想排除的内容（多余的头、悬浮的头、畸形、糟糕的透视、多手多脚、水印、
+        文字、分格、多个角色…）写进 negative_prompt 参数，**绝对不要**写成
+        `prompt + " --no xxx"`。
+        原因：本地后端是 ComfyUI 的文本编码器，只认纯文本，**没有 --no 这种语法**
+        （那是某些前端自己的糖）。写进 prompt 会被当成正面描述，等于主动要求
+        模型把那些东西画出来。
+        云端 Seedream 没有负面提示词字段，这个参数会被忽略，不影响出图。
+
+        ============================================================
         其它约定
         ============================================================
         · 参数名：控制参考图的参数只有 reference_source。不要写 use_reference_image /
@@ -3701,6 +3767,9 @@ class ComfyArkImagePlugin(Star):
                 如「美感版」「精准版」「参考版」）。只在使用本地 ComfyUI 时有效；
                 云端不区分工作流。留空 = 插件按「有没有参考图」自动挑。
                 名字写错不会静默换一套，插件会如实告诉你可选哪些。
+            negative_prompt(string): 可选，要排除的内容，逗号分隔。例：
+                `多余的头, 悬浮的头, 畸形, 糟糕的透视, 多手多脚, 水印, 文字`。
+                **不要把 `--no` 写进 prompt**（本后端不认那个语法）。仅本地生效。
             size(string): 可选，图片尺寸，默认跟随插件配置（通常 2K）。可选值：1K / 2K / 3K / 4K。
             count(number): 可选，生成数量，默认 1。仅部分模型支持多张，不支持时会自动降级为 1 张。
         """
@@ -3717,6 +3786,8 @@ class ComfyArkImagePlugin(Star):
             raw_args[CANONICAL_REF_PARAM] = reference_source
         if workflow is not None:
             raw_args[CANONICAL_WORKFLOW_PARAM] = workflow
+        if negative_prompt is not None:
+            raw_args[CANONICAL_NEG_PARAM] = negative_prompt
         norm = normalize_tool_args(raw_args, known=REAL_PARAMS)
         arg_llm_tip, arg_user_tip = describe_arg_fixes(norm)
         if norm.unknown_params:
@@ -3734,6 +3805,10 @@ class ComfyArkImagePlugin(Star):
                 f"[{PLUGIN_NAME}] 工作流参数已归一化：{norm.workflow_param} → "
                 f"workflow={norm.workflow!r}"
             )
+        if norm.negative:
+            logger.info(
+                f"[{PLUGIN_NAME}] 本次负面提示词：{norm.negative[:120]}"
+            )
 
         mode = "text" if norm.ref_source == REF_SOURCE_NONE else "auto"
         _ok, llm, _user = await self._do_generate(
@@ -3744,6 +3819,7 @@ class ComfyArkImagePlugin(Star):
             count=coerce_int(count),
             ref_source=norm.ref_source,
             workflow=norm.workflow,
+            negative=norm.negative,
             arg_llm_tip=arg_llm_tip,
             arg_user_tip=arg_user_tip,
         )
