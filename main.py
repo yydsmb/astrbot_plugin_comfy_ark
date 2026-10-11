@@ -270,6 +270,7 @@ from .slot_tokens import (
 )
 from .tool_args import (
     CANONICAL_REF_PARAM,
+    CANONICAL_WORKFLOW_PARAM,
     REAL_PARAMS,
     coerce_int,
     coerce_size,
@@ -277,9 +278,15 @@ from .tool_args import (
     describe_arg_fixes,
     normalize_tool_args,
 )
+from .workflows import (
+    WorkflowEntry,
+    describe_for_llm as describe_workflows_for_llm,
+    match as match_workflow,
+    scan_dir as scan_workflow_dir,
+)
 
 PLUGIN_NAME = "astrbot_plugin_comfy_ark"
-PLUGIN_VERSION = "3.0.0"
+PLUGIN_VERSION = "3.1.0"
 API_URL = "https://ark.cn-beijing.volces.com/api/v3/images/generations"
 # Agent Plan / CodePlan 专属端点：模型名用「点号」形式（doubao-seedream-5.0-lite），
 # 且必须配套 plan 专属 API Key；拿普通 Key 访问会返回 401 AuthenticationError。
@@ -323,6 +330,15 @@ REF_SOURCES = (REF_SOURCE_AUTO, REF_SOURCE_PERSONA, REF_SOURCE_MESSAGE, REF_SOUR
 # 本地工作流自带文件（配置留空时用它们）
 BUNDLED_T2I_WORKFLOW = "qwen_t2i.json"
 BUNDLED_REF_WORKFLOW = "qwen_ref.json"
+
+# 「可选工作流」目录：AI 能自己挑的预设都放这里（相对插件根目录）。
+# 目录即清单 —— 丢一个 *.json（必须 API 格式）进去就自动进入 AI 的候选；
+# 同名 .txt 的首行【名称】当显示名，余下当用途说明，供模型判断何时该用它。
+PRESET_SUBDIR = ("workflows", "presets")
+
+# 工作流的两种角色。由 detect_workflow 按连线反推，**不看文件名**。
+KIND_REF = "ref"  # 能吃参考图
+KIND_T2I = "t2i"  # 只能文生图
 
 # 官方口径：输入参考图数 + 最终生成图片数 ≤ 15
 TOTAL_IMAGE_LIMIT = 15
@@ -866,13 +882,32 @@ class ComfyArkImagePlugin(Star):
         self.comfy_height = clamp_int(cfg.get("comfyui_height"), 256, 4096, 1024)
         # Qwen Image 2.1 的 resolution：参考图会被缩放到约 resolution×resolution（0 = 保持原尺寸）
         self.comfy_resolution = clamp_int(cfg.get("comfyui_resolution"), 0, 4096, 1024)
-        self.comfy_steps = clamp_int(cfg.get("comfyui_steps"), 1, 100, 25)
+        # 步数：0 = 不覆盖，沿用工作流 JSON 里自带的值。精准版 35 步、美感版 25 步
+        # 本来就不一样，用一把统一的尺子去量会把各自调好的参数抹平。
+        self.comfy_steps = clamp_int(cfg.get("comfyui_steps"), 0, 100, 0)
         self.comfy_negative = str(cfg.get("comfyui_negative_prompt") or "").strip()
         # 参考图工作流失败时是否退回纯文本工作流（用户明确要的行为）
         self.comfy_ref_fallback = bool(cfg.get("comfyui_ref_fallback_text", True))
         # 工作流路径留空 = 用插件自带的那两个
         self.comfy_t2i_workflow = str(cfg.get("comfyui_t2i_workflow") or "").strip()
         self.comfy_ref_workflow = str(cfg.get("comfyui_ref_workflow") or "").strip()
+
+        # ---------- 可选工作流：让 AI 自己挑（v3.1.0）----------
+        # 目录留空 = 插件自带的 workflows/presets/。目录即清单，不写配置。
+        _wf_dir = str(cfg.get("comfyui_workflow_dir") or "").strip()
+        self.comfy_workflow_dir = _wf_dir or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), *PRESET_SUBDIR
+        )
+        # 关掉 = 不把清单交给模型，永远按 ref 需求自动挑（旧行为）
+        self.comfy_workflow_select = bool(cfg.get("comfyui_workflow_select", True))
+        # AI 没指定时优先用哪个（按名字匹配，找不到就自动挑）
+        self.comfy_default_workflow = str(
+            cfg.get("comfyui_default_workflow") or ""
+        ).strip()
+        # (mtime, entries) —— 目录内容变了才重扫，避免每次生图都读盘
+        self._wf_cache: tuple[float, list[WorkflowEntry]] = (-1.0, [])
+        # path -> (wf, spec, err) —— 单个预设的加载结果，进程内缓存
+        self._entry_cache: dict[str, tuple[dict | None, WorkflowSpec | None, str]] = {}
 
         # ---------- 人格参考图 ----------
         _ref_dir = str(cfg.get("reference_dir") or "").strip()
@@ -2037,11 +2072,23 @@ class ComfyArkImagePlugin(Star):
         except Exception as e:
             logger.debug(f"[{PLUGIN_NAME}] 注入提示词时解析参考图失败（忽略）：{e}")
 
+        # 工作流清单：只有本轮真有可能走本地时才写进去 —— 纯云端用户看到
+        # 一堆「美感版/精准版」只会白占注意力，那几套工作流对他们毫无意义。
+        local_ok = self.backend in (BACKEND_LOCAL_FIRST, BACKEND_LOCAL_ONLY)
+        menu = ""
+        if local_ok and self.comfy_workflow_select:
+            try:
+                menu = self._workflow_menu_text()
+            except Exception as e:
+                logger.debug(f"[{PLUGIN_NAME}] 注入提示词时扫描工作流失败（忽略）：{e}")
+
         block = build_system_block(
             persona_name=name,
             ref_filename=fname,
             candidates=candidates,
             suggestion=suggestion,
+            workflow_menu=menu,
+            local_available=local_ok,
         )
         self._guide_cache[umo] = (now, block)
         if len(self._guide_cache) > 200:  # 简单限长，别随会话数无限涨
@@ -2099,8 +2146,168 @@ class ComfyArkImagePlugin(Star):
     def _comfy_base(self) -> str:
         return normalize_comfy_url(self.comfy_url)
 
+    # ---- 可选工作流清单：让模型自己挑（v3.1.0）----
+
+    def _local_workflows(self) -> list[WorkflowEntry]:
+        """扫一遍预设目录。目录 mtime 没变就复用上次结果（生图是热路径）。"""
+        path = self.comfy_workflow_dir
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            self._wf_cache = (-1.0, [])
+            return []
+        if self._wf_cache[0] == mtime:
+            return self._wf_cache[1]
+        entries = scan_workflow_dir(path)
+        self._wf_cache = (mtime, entries)
+        return entries
+
+    def _entry_info(
+        self, entry: WorkflowEntry
+    ) -> tuple[dict | None, WorkflowSpec | None, str]:
+        """加载某个预设 → (工作流, 语义映射, 错误说明)。按路径缓存。"""
+        cached = self._entry_cache.get(entry.path)
+        if cached is not None:
+            return cached
+        try:
+            wf, spec = self._read_workflow_file(entry.path, f"工作流「{entry.name}」")
+            out: tuple[dict | None, WorkflowSpec | None, str] = (wf, spec, "")
+        except Exception as e:  # noqa: BLE001 —— 单个预设坏掉不该拖垮整份清单
+            out = (None, None, str(e))
+        self._entry_cache[entry.path] = out
+        return out
+
+    def _workflow_menu(self) -> list[tuple[WorkflowEntry, WorkflowSpec]]:
+        """能用的预设：读得通、认得出采样器与提示词节点。坏掉的直接不进清单。"""
+        out: list[tuple[WorkflowEntry, WorkflowSpec]] = []
+        for entry in self._local_workflows():
+            wf, spec, _err = self._entry_info(entry)
+            if wf is not None and spec is not None:
+                out.append((entry, spec))
+        return out
+
+    def _workflow_menu_text(self) -> str:
+        """给模型看的清单。除了用途，还钉上「吃不吃参考图」这个硬事实 ——
+        模型光看用途描述猜不出这一点，猜错就会白丢参考图。"""
+        items = self._workflow_menu()
+        lines: list[str] = []
+        for entry, spec in items:
+            tag = "支持参考图" if spec.supports_reference else "纯文生图"
+            text = " ".join(entry.desc.split())
+            if len(text) > 64:
+                text = text[:63] + "…"
+            head = f"· {entry.name}（{tag}）"
+            lines.append(f"{head}：{text}" if text else head)
+        return "\n".join(lines)
+
+    def _pick_local_workflow(
+        self, want: str, need_ref: bool
+    ) -> tuple[WorkflowEntry | None, str]:
+        """把「模型想要哪套 + 这次有没有参考图」落到一套具体预设上。
+
+        返回 (预设, 给模型的说明)；预设为 None = 让调用方回落插件自带的那两个。
+
+        规则按优先级：
+          1. 模型点名了 → 用它。点名的与参考图需求冲突时**以「吃不吃参考图」为准改选**，
+             并如实说清楚 —— 静默换一套跑出来的图，模型和用户都会莫名其妙。
+          2. 没点名：需要参考图 → 挑第一套支持参考图的；否则先看配置指定的默认，
+             再否则挑第一套纯文生图的。
+        """
+        if not self.comfy_workflow_select:
+            return None, ""
+        items = self._workflow_menu()
+        if not items:
+            return None, ""
+        available = "、".join(e.name for e, _s in items)
+
+        want = str(want or "").strip()
+        if not want:
+            return self._default_local_pick(items, need_ref), ""
+
+        hit, _why = match_workflow([e for e, _s in items], want)
+        if hit is None:
+            # 点名不存在：照常出图（用默认挑法），但必须如实说清楚，
+            # 免得模型以为「我点的那套生效了」而在下一轮继续点它。
+            return self._default_local_pick(items, need_ref), (
+                f"（你点名的「{want}」不在本机清单里，本次按默认挑了。"
+                f"可选：{available}）"
+            )
+        found = next((p for p in items if p[0].key == hit.key), None)
+        if found is None:  # pragma: no cover —— 清单同源，正常走不到
+            return self._default_local_pick(items, need_ref), (
+                f"（你点名的「{hit.name}」本机加载不了，本次按默认挑了。"
+                f"可选：{available}）"
+            )
+
+        entry, note = self._reconcile_pick(found[0], found[1], items, need_ref)
+        if entry is None:
+            # 点名的与参考图需求互斥、又没有替代品 —— 仍然出图，退到默认
+            return self._default_local_pick(items, need_ref), note
+        return entry, note
+
+    def _reconcile_pick(
+        self,
+        entry: WorkflowEntry,
+        spec: WorkflowSpec,
+        items: list[tuple[WorkflowEntry, WorkflowSpec]],
+        need_ref: bool,
+    ) -> tuple[WorkflowEntry | None, str]:
+        """把「点名的那套」与「这次要不要参考图」对齐；冲突时改选并说明理由。
+
+        为什么以参考图为准：参考图是用户/AI 明确给的身份约束，丢了它画出来的人
+        就不像；而工作流只是画法偏好，换一套仍然能出图。两者冲突时牺牲后者。
+        """
+        if need_ref and not spec.supports_reference:
+            alt = next((p for p in items if p[1].supports_reference), None)
+            if alt is None:
+                return None, f"（「{entry.name}」不吃参考图，且清单里没有支持参考图的预设）"
+            return alt[0], (
+                f"（本次要用参考图，而「{entry.name}」不吃参考图，"
+                f"已改用「{alt[0].name}」）"
+            )
+        if not need_ref and spec.supports_reference:
+            alt = next((p for p in items if not p[1].supports_reference), None)
+            if alt is None:
+                return None, f"（「{entry.name}」必须有参考图，但这次没有可用的参考图）"
+            return alt[0], (
+                f"（「{entry.name}」必须有参考图，但这次没有可用的参考图，"
+                f"已改用「{alt[0].name}」）"
+            )
+        return entry, ""
+
+    def _default_local_pick(
+        self,
+        items: list[tuple[WorkflowEntry, WorkflowSpec]],
+        need_ref: bool,
+    ) -> WorkflowEntry:
+        """没点名（或点名失败）时挑哪套。
+
+        顺序：要参考图就先找能吃参考图的 → 配置指定的默认 → 第一套纯文生图
+        → 清单里第一套（全是参考图工作流时的兜底）。
+        """
+        if need_ref:
+            alt = next((p for p in items if p[1].supports_reference), None)
+            if alt is not None:
+                return alt[0]
+        if self.comfy_default_workflow:
+            hit, _why = match_workflow(
+                [e for e, _s in items], self.comfy_default_workflow
+            )
+            if hit is not None:
+                found = next((p for p in items if p[0].key == hit.key), None)
+                if found is not None and (not need_ref or found[1].supports_reference):
+                    return found[0]
+        alt = next((p for p in items if not p[1].supports_reference), None)
+        if alt is not None:
+            return alt[0]
+        return items[0][0]
+
     def _workflow_file(self, kind: str) -> str:
-        """工作流 JSON 路径。kind: t2i（纯文本）/ ref（参考图）。"""
+        """兜底工作流的 JSON 路径。kind: t2i（纯文本）/ ref（参考图）。
+
+        仅在「预设清单为空」或「清单里的都被关掉」时才走到这里 ——
+        有预设时优先用预设（那一套才是模型自己选的）。
+        """
         custom = self.comfy_ref_workflow if kind == "ref" else self.comfy_t2i_workflow
         if custom:
             return (
@@ -2114,8 +2321,13 @@ class ComfyArkImagePlugin(Star):
         )
 
     def _load_workflow(self, kind: str) -> tuple[dict, WorkflowSpec]:
+        """按角色加载兜底工作流。kind: t2i / ref。"""
         path = self._workflow_file(kind)
         label = "参考图" if kind == "ref" else "文生图"
+        return self._read_workflow_file(path, label)
+
+    def _read_workflow_file(self, path: str, label: str) -> tuple[dict, WorkflowSpec]:
+        """读一个 API 格式工作流并反推语义。label 只用于报错信息。"""
         if not os.path.isfile(path):
             raise RuntimeError(f"找不到{label}工作流文件：{path}")
         try:
@@ -2244,31 +2456,49 @@ class ComfyArkImagePlugin(Star):
         )
 
     async def _run_local_workflow(
-        self, kind: str, prompt: str, ref_local_path: str | None, count: int
+        self,
+        kind: str,
+        prompt: str,
+        ref_local_path: str | None,
+        count: int,
+        entry: WorkflowEntry | None = None,
     ) -> tuple[list[str], list[str]]:
-        """跑一次本地工作流，返回 (图片URL列表, 说明列表)。"""
-        wf, spec = self._load_workflow(kind)
+        """跑一次本地工作流，返回 (图片URL列表, 说明列表)。
+
+        entry 非空 = 跑清单里模型挑的那套预设；为空 = 跑插件自带的兜底工作流。
+        """
+        if entry is not None:
+            wf, spec, err = self._entry_info(entry)
+            if wf is None or spec is None:
+                raise RuntimeError(err or f"工作流「{entry.name}」加载失败")
+            label = entry.name
+        else:
+            wf, spec = self._load_workflow(kind)
+            label = os.path.basename(self._workflow_file(kind))
+
         notes: list[str] = []
 
         ref_name = ""
         if ref_local_path:
             if not spec.supports_reference:
                 raise RuntimeError(
-                    "该工作流结构上不吃参考图（没有已连到文本编码节点的 LoadImage）"
+                    f"工作流「{label}」结构上不吃参考图"
+                    "（没有已连到文本编码节点的 LoadImage）"
                 )
             ref_name = await self._comfy_upload(ref_local_path)
 
         seed = self.seed if self.seed >= 0 else random.randint(1, 2**31 - 1)
-        # 只有「用 EmptyLatentImage 出画布」的工作流才谈得上批量；
-        # 参考图工作流的画布尺寸由参考图决定，没有 batch 字段。
-        batch = count if (kind == "t2i" and spec.batch_field) else None
+        # 带 batch_size 字段的工作流才谈得上一次出多张（那些靠 EmptyLatentImage
+        # 出画布的）；画布跟着参考图走的没有这个字段。
+        batch = count if spec.batch_field else None
         new_wf, apply_notes = apply_params(
             wf,
             spec,
             prompt=prompt,
             negative_prompt=self.comfy_negative or None,
             seed=seed,
-            steps=self.comfy_steps,
+            # steps=None = 不覆盖，沿用工作流 JSON 自带的值（精准版 35 / 美感版 25）
+            steps=self.comfy_steps or None,
             width=self.comfy_width,
             height=self.comfy_height,
             batch_size=batch,
@@ -2279,9 +2509,9 @@ class ComfyArkImagePlugin(Star):
 
         base = self._comfy_base()
         logger.info(
-            f"[{PLUGIN_NAME}] 本地 {kind} 工作流"
-            f"（{os.path.basename(self._workflow_file(kind))}）：{spec.describe()}"
-            f" | seed={seed} steps={self.comfy_steps}"
+            f"[{PLUGIN_NAME}] 本地工作流「{label}」：{spec.describe()}"
+            f" | seed={seed}"
+            + (f" steps={self.comfy_steps}" if self.comfy_steps else " steps=跟随工作流")
             + (
                 f" | 参考图 {os.path.basename(ref_local_path)}"
                 if ref_local_path
@@ -2290,36 +2520,53 @@ class ComfyArkImagePlugin(Star):
         )
         prompt_id = await self._comfy_submit(new_wf)
         images = await self._comfy_wait(prompt_id)
-        notes.append(f"（本地 ComfyUI seed={seed}）")
+        notes.append(f"（本地 ComfyUI「{label}」seed={seed}）")
         return [img.endpoint(base) for img in images], notes
 
     async def _generate_local(
-        self, prompt: str, ref_local_path: str | None, count: int
+        self,
+        prompt: str,
+        ref_local_path: str | None,
+        count: int,
+        workflow: str = "",
     ) -> tuple[list[str], list[str]]:
-        """本地生成。带「参考图工作流失败 → 退回纯文本工作流」的降级。
+        """本地生成。工作流选择 + 「参考图工作流失败 → 退回纯文本」的降级。
 
-        这条降级是用户明确要的：参考图工作流一旦报错（参考图不对、工作流被改动、
-        自定义节点缺失…），不要让整次请求失败，而是丢掉参考图用纯文本重新生成。
+        workflow 是模型点名的工作流名（清单里的那个），留空 = 由插件按需求自己挑。
+        「参考图失败退回纯文本」是用户明确要的：参考图工作流一旦报错（参考图不对、
+        工作流被改动、自定义节点缺失…），不要让整次请求失败，而是丢掉参考图重来。
         """
+        entry, pick_note = self._pick_local_workflow(workflow, need_ref=bool(ref_local_path))
+        extra = [pick_note] if pick_note else []
+
         if ref_local_path:
             try:
-                return await self._run_local_workflow(
-                    "ref", prompt, ref_local_path, count
+                urls, notes = await self._run_local_workflow(
+                    KIND_REF, prompt, ref_local_path, count, entry=entry
                 )
+                return urls, extra + notes
             except Exception as e:
                 if not self.comfy_ref_fallback:
                     raise
                 logger.warning(
                     f"[{PLUGIN_NAME}] 参考图工作流失败，改用纯文本工作流重新生成。原因：{e}"
                 )
-                urls, notes = await self._run_local_workflow("t2i", prompt, None, count)
+                # 重来时已经不带参考图了，也就不该再点名那套参考图工作流
+                t2i_entry, _n = self._pick_local_workflow(workflow, need_ref=False)
+                urls, notes = await self._run_local_workflow(
+                    KIND_T2I, prompt, None, count, entry=t2i_entry
+                )
                 notes.insert(
                     0,
                     "（参考图工作流报错，已改用纯文本重新生成 —— 本次没有用参考图。"
                     f"原因：{str(e)[:140]}）",
                 )
-                return urls, notes
-        return await self._run_local_workflow("t2i", prompt, None, count)
+                return urls, extra + notes
+
+        urls, notes = await self._run_local_workflow(
+            KIND_T2I, prompt, None, count, entry=entry
+        )
+        return urls, extra + notes
 
     async def _probe_comfy(self) -> str:
         """本地 ComfyUI 自检：连通性 / 版本 / 显存 / 队列 / 工作流节点齐不齐。"""
@@ -2351,6 +2598,36 @@ class ComfyArkImagePlugin(Star):
             lines.append(f"⚠️ 取不到节点清单（{e}），跳过工作流校验。")
             return "\n".join(lines)
 
+        # ---- 可选清单（模型能自己挑的那些）----
+        lines.append(f"可选工作流：{self.comfy_workflow_dir}")
+        if not self.comfy_workflow_select:
+            lines.append("   ⚠️ comfyui_workflow_select 已关闭 —— 不会交给模型自选。")
+        menu = self._workflow_menu()
+        if menu:
+            for entry, spec in menu:
+                wf_e, _s, _e = self._entry_info(entry)
+                missing = missing_node_types(wf_e or {}, object_info)
+                tag = "支持参考图" if spec.supports_reference else "纯文生图"
+                lines.append(
+                    f"{'❌' if missing else '✅'} {entry.name}（{tag}）："
+                    f"{os.path.basename(entry.path)}"
+                )
+                lines.append(f"   {spec.describe()}")
+                if missing:
+                    lines.append(
+                        f"   缺节点：{'、'.join(missing)}（请在 ComfyUI 里装好对应插件）"
+                    )
+        for entry in self._local_workflows():
+            wf_b, _s, verr = self._entry_info(entry)
+            if wf_b is None:
+                lines.append(
+                    f"❌ {entry.name}（{os.path.basename(entry.path)}）：{str(verr)[:160]}"
+                )
+        if not menu:
+            lines.append("   （没有可用工作流，将只用下面的兜底工作流）")
+
+        lines.append("")
+        lines.append("兜底工作流（清单为空时使用）：")
         for kind, label in (("t2i", "文生图"), ("ref", "参考图")):
             try:
                 wf, spec = self._load_workflow(kind)
@@ -2534,6 +2811,7 @@ class ComfyArkImagePlugin(Star):
         size: str | None = None,
         count: int | None = None,
         ref_source: str = REF_SOURCE_AUTO,
+        workflow: str = "",
         arg_llm_tip: str = "",
         arg_user_tip: str = "",
     ) -> tuple[bool, str, str]:
@@ -2541,6 +2819,7 @@ class ComfyArkImagePlugin(Star):
 
         mode: auto（自动判断）/ text（强制文生图）/ image（强制图生图）
         ref_source: auto / persona / message / none —— 参考图从哪来
+        workflow: 本地工作流名（清单里的那个），留空 = 插件按需求自己挑
         arg_llm_tip / arg_user_tip: 「工具参数容错层」的说明文本。只有 LLM 工具入口
             会传；指令入口不传。调用方与用户都收不到时留空（= 参数一切正常）。
 
@@ -2550,7 +2829,7 @@ class ComfyArkImagePlugin(Star):
             ref_source = REF_SOURCE_AUTO
         try:
             ok, llm, user = await self._run_generate(
-                event, prompt, mode, size, count, ref_source
+                event, prompt, mode, size, count, ref_source, workflow
             )
         except Exception as e:
             logger.error(f"[{PLUGIN_NAME}] 生图异常：{e}", exc_info=True)
@@ -2571,6 +2850,7 @@ class ComfyArkImagePlugin(Star):
         size: str | None,
         count: int | None,
         ref_source: str = REF_SOURCE_AUTO,
+        workflow: str = "",
     ) -> tuple[bool, str, str]:
         # v2.0.0：api_key 不再是硬门槛 —— backend=local_only 时纯本地跑，不需要 Key。
         # 真正需要 Key 的那一步（调云端）会自己再检查一次。
@@ -2790,7 +3070,7 @@ class ComfyArkImagePlugin(Star):
                 )
                 async with self._sem:
                     urls, local_notes = await self._generate_local(
-                        local_prompt, local_ref, effective
+                        local_prompt, local_ref, effective, workflow=workflow
                     )
                 used_backend = BACKEND_LOCAL
                 note += "".join(local_notes)
@@ -3319,6 +3599,7 @@ class ComfyArkImagePlugin(Star):
         event: AstrMessageEvent,
         prompt: str = "",
         reference_source: str | None = None,
+        workflow: str | None = None,
         size: str = None,
         count: int = None,
         **kwargs,
@@ -3388,6 +3669,18 @@ class ComfyArkImagePlugin(Star):
         二次元赛璐璐风格，自然光线，高质量。
 
         ============================================================
+        第三步：选工作流（只对本地 ComfyUI 生效，云端不区分）
+        ============================================================
+        可用清单见系统提示词里那一节（会随插件配置变化），**以那里为准**。
+        不传 workflow = 插件自己挑（有参考图挑支持参考图的，否则挑默认的）。
+        什么时候值得点名：
+        · 有参考图 → 必须挑支持参考图的那套，否则参考图白给；
+        · 用户点名要某个已知二次元角色（流萤、芙宁娜这类）且没有参考图 →
+          挑「精准版」，并且**必须把 prompt 整段改写成英文**，它只吃英文提示词；
+        · 画原创角色 / 日常场景 / 风景物品 → 挑「美感版」，快且稳；
+        · 拿不准就**不要传**，让插件自己挑。
+
+        ============================================================
         其它约定
         ============================================================
         · 参数名：控制参考图的参数只有 reference_source。不要写 use_reference_image /
@@ -3404,6 +3697,10 @@ class ComfyArkImagePlugin(Star):
                 message = 用本次消息里附带的图 / 引用回复的图；
                 none = 完全不用参考图，纯文生图；
                 不传（省略这个参数）= auto，插件按配置优先级自动挑。
+            workflow(string): 可选，指定本地工作流名（就是系统提示词里列出的那些，
+                如「美感版」「精准版」「参考版」）。只在使用本地 ComfyUI 时有效；
+                云端不区分工作流。留空 = 插件按「有没有参考图」自动挑。
+                名字写错不会静默换一套，插件会如实告诉你可选哪些。
             size(string): 可选，图片尺寸，默认跟随插件配置（通常 2K）。可选值：1K / 2K / 3K / 4K。
             count(number): 可选，生成数量，默认 1。仅部分模型支持多张，不支持时会自动降级为 1 张。
         """
@@ -3418,6 +3715,8 @@ class ComfyArkImagePlugin(Star):
         raw_args = dict(kwargs)
         if reference_source is not None:
             raw_args[CANONICAL_REF_PARAM] = reference_source
+        if workflow is not None:
+            raw_args[CANONICAL_WORKFLOW_PARAM] = workflow
         norm = normalize_tool_args(raw_args, known=REAL_PARAMS)
         arg_llm_tip, arg_user_tip = describe_arg_fixes(norm)
         if norm.unknown_params:
@@ -3430,6 +3729,11 @@ class ComfyArkImagePlugin(Star):
                 f"[{PLUGIN_NAME}] 工具参数已归一化：{norm.used_param}="
                 f"{norm.used_value!r} → reference_source={norm.ref_source}"
             )
+        if norm.workflow_coerced:
+            logger.info(
+                f"[{PLUGIN_NAME}] 工作流参数已归一化：{norm.workflow_param} → "
+                f"workflow={norm.workflow!r}"
+            )
 
         mode = "text" if norm.ref_source == REF_SOURCE_NONE else "auto"
         _ok, llm, _user = await self._do_generate(
@@ -3439,6 +3743,7 @@ class ComfyArkImagePlugin(Star):
             size=coerce_size(size),
             count=coerce_int(count),
             ref_source=norm.ref_source,
+            workflow=norm.workflow,
             arg_llm_tip=arg_llm_tip,
             arg_user_tip=arg_user_tip,
         )
@@ -3484,6 +3789,16 @@ class ComfyArkImagePlugin(Star):
         cache_txt = (
             f"{self.cache_seconds} 秒内同提示词复用" if self.cache_seconds else "关闭"
         )
+        _menu = self._workflow_menu()
+        if not self.comfy_workflow_select:
+            wf_line = "已关闭（一律按「有没有参考图」自动挑）"
+        elif _menu:
+            wf_line = "AI 可自选： " + "、".join(
+                f"{e.name}{'（支持参考图）' if s.supports_reference else ''}"
+                for e, s in _menu
+            )
+        else:
+            wf_line = f"无可选预设（{self.comfy_workflow_dir} 为空，用兜底工作流）"
         return (
             f"🎨 Comfy豆包通用生图 v{PLUGIN_VERSION}\n"
             f"生成后端：{BACKEND_ZH.get(self.backend, self.backend)}"
@@ -3507,6 +3822,7 @@ class ComfyArkImagePlugin(Star):
             f"提示词层：{'已开启' if self.prompt_guide_enabled else '已关闭'}"
             "（system_prompt 注入「生图前自查」｜工具说明含固定模板与 3 个示例｜"
             "本地 Qwen 保留 <imageN> 槽位，云端自动翻成自然语言）\n"
+            f"本地工作流：{wf_line}\n"
             f"{self._cost_line()}\n"
             f"省钱护栏：每人每天 {self.daily_limit if self.daily_limit else '不限'} 张｜"
             f"同图缓存{cache_txt}｜今日已生成 {self._daily_total()} 张\n\n"
@@ -3529,6 +3845,12 @@ class ComfyArkImagePlugin(Star):
             "【B】消息附图 —— 图片和指令发在同一条消息、引用一条带图的消息、\n"
             "    或把图片链接直接写进提示词。\n"
             "两种都不给也能画，直接 /画图 <提示词> 即可。\n\n"
+            "本地工作流（AI 自己挑）：\n"
+            f"· 插件扫描 {self.comfy_workflow_dir} 下的所有 *.json（必须 API 格式），\n"
+            "  把「名字 + 用途」清单交给 AI 按需求自己挑，不用你每次指定。\n"
+            "· 同名 .txt 就是它的说明：首行写【名称】，余下写什么时候该用它。\n"
+            "  加一套新工作流只要丢两个文件进目录，不改配置也不改代码。\n"
+            "· 想固定用某套：把 comfyui_workflow_select 关掉，再设 comfyui_default_workflow。\n\n"
             "内容审查：\n"
             "· 生成前先让识图模型判断提示词；生成后再判断出图的图片，命中 R18 直接拦截不发。\n"
             "· 识图模型在配置 moderation_provider_id 里填 Provider ID（发 /画图审查 可看列表）。\n"

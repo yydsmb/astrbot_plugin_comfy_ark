@@ -48,10 +48,10 @@
     "default": 1024
   },
   "comfyui_steps": {
-    "description": "采样步数。",
+    "description": "采样步数。填 0 = 跟随工作流自带的步数（推荐）—— 精准版官方推荐 35 步、美感版 25 步，用一把统一的尺子去量会把各自调好的参数抹平。",
     "type": "int",
-    "hint": "Qwen Image 2.1 官方推荐 25。调高更细但线性变慢；低于 15 出图容易糊。",
-    "default": 25
+    "hint": "填 >0 才会强制覆盖所有工作流。调高更细但线性变慢；低于 15 出图容易糊。",
+    "default": 0
   },
   "comfyui_negative_prompt": {
     "description": "本地工作流的负面提示词（写进 TextEncode 节点的 negative_prompt）。留空表示不改工作流里的原值。",
@@ -75,6 +75,24 @@
     "description": "本地「参考图」工作流（图生图）的 JSON 文件路径（API 格式）。留空 = 用插件自带的 qwen_ref.json。",
     "type": "string",
     "hint": "同样是 API 格式。插件会自动找到 LoadImage 节点并把它接进文本编码器，把用户提供的参考图上传后填进去。",
+    "default": ""
+  },
+  "comfyui_workflow_dir": {
+    "description": "「可选工作流」目录。留空 = 插件自带的 workflows/presets/。",
+    "type": "string",
+    "hint": "目录即清单：放一个 *.json（必须 ComfyUI「导出（API）」格式）进去，它就自动进入 AI 的候选；同名 .txt 提供说明 —— 首行写【名称】，余下写什么时候该用它。加一套新工作流不用改这里的任何配置。",
+    "default": ""
+  },
+  "comfyui_workflow_select": {
+    "description": "是否把工作流清单交给 AI，让它按需求自己挑（默认开启）。",
+    "type": "bool",
+    "hint": "开启时：模型在对话里用 workflow 参数点名（画特定角色用精准版、有参考图用参考版…）。关闭时：每轮一律按「有没有参考图」自动挑，模型不能干预。",
+    "default": true
+  },
+  "comfyui_default_workflow": {
+    "description": "AI 没有指定工作流时优先用哪一个（填清单里的名字，如「美感版」）。留空 = 自动挑。",
+    "type": "string",
+    "hint": "按名字匹配；写错或找不到会静默回落到自动挑（发 /画图诊断 能看到清单）。",
     "default": ""
   },
   "api_key": {

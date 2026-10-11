@@ -21,6 +21,21 @@ desc: |
   - 一套提示词喂两个后端：本地 Qwen 保留 `<imageN>` 槽位，云端 Seedream 自动翻译成自然语言；
     引用了本次不存在的图的句子会被按句摘掉，并如实回报
 
+  ### 多工作流（让 AI 自己挑）
+  插件扫描 `workflows/presets/` 下的每个 `*.json`（ComfyUI「导出（API）」格式），
+  并读同名 `.txt` 作说明 —— 首行 `【名称】` 是显示名，余下写什么时候该用它 ——
+  拼成一份清单注入 system_prompt，**由模型按当次需求自己挑**：
+
+  | 预设 | 用途 |
+  | --- | --- |
+  | 美感版 | 通用场景最优、出图快、中英文都行；还原特定角色的长相不行 |
+  | 精准版 | 还原特定二次元角色最准；代价是慢，且必须英文提示词 |
+  | 参考版 | 唯一支持参考图的预设；顺着人格图 / 用户图改场景、姿势时用它 |
+
+  调用时用 `workflow` 参数点名；不传则由插件按「有没有参考图」自动挑。
+  点名了不存在的工作流不会静默换一套跑掉，会如实告诉你可选哪些。
+  加一套新工作流只要往目录里丢两个文件，不改配置、不改代码。
+
   ### 内容审查
   本地出图没有上游审核，插件自己挡两道：**生成前查提示词、生成后查图片**，
   命中 R18 直接拦截不发。识图模型由 `moderation_provider_id` 指定（`/画图审查` 可看列表）。
@@ -43,7 +58,7 @@ desc: |
   [MIT License](https://opensource.org/license/mit)。可自由使用、修改、分发（含商用），保留版权与许可声明即可。
   完整条款见仓库根目录 `LICENSE`。
 
-version: 3.0.0
+version: 3.1.0
 author: 橙橘
 astrbot_version: ">=4.17.0"
 repo: https://github.com/yydsmb/astrbot_plugin_comfy_ark
@@ -54,6 +69,7 @@ tags:
   - ComfyUI
   - 豆包
   - Seedream
+  - 工作流
   - image
 support_platforms:
   - aiocqhttp

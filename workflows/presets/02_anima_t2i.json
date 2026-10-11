@@ -1,0 +1,117 @@
+{
+  "1": {
+    "inputs": {
+      "unet_name": "SilvermoonMix-Anima29B-Evolved-V2.3.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "① 加载扩散模型"
+    }
+  },
+  "2": {
+    "inputs": {
+      "clip_name": "qwen_3_06b_base.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "② 加载文本编码器"
+    }
+  },
+  "3": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "③ 加载 VAE"
+    }
+  },
+  "4": {
+    "inputs": {
+      "prompt": "An original anime girl, floating in mid-air. She has long twin-tails that gradient from deep purple at the roots to bright pink at the tips, each tail wrapped with silver ribbons adorned with tiny bells and star charms. Straight bangs. Her left eye is golden, her right eye is blue, with star-shaped highlights in both pupils. She wears a gothic dress in white and deep blue, off-shoulder design, with a large deep-blue bow on her chest, centered with a glowing sapphire. The skirt is multi-layered: an outer translucent gauze printed with constellation patterns, and an inner deep-blue satin layer. A silver chain hangs at her waist, holding a small glass bottle filled with colorful liquid. She wears long gloves with glowing runes. Her right hand holds a crescent-moon staff, with a miniature planet floating at its tip. Her left hand is gently raised, fingertips emitting points of light. She wears white thigh-high stockings with lace tops, and deep-blue short boots with glowing stripes. Above her head floats a halo made of tiny gears and stars, slowly rotating. She wears a black choker with a key-shaped pendant. Her expression is gentle and mysterious, with a faint smile and deep eyes. The background is a ruined landscape under a night sky, with a giant broken clock in the distance, its hands frozen. Glowing book pages and candles float around. The ground is broken mirror shards reflecting the starry sky. Mysterious, dreamy, slightly melancholic atmosphere. Anime style, cel-shaded, rich details, layered lighting, high quality, masterpiece.\n",
+      "negative_prompt": "low quality, worst quality, bad anatomy, extra digits, missing fingers, fused fingers, watermark, text, signature, split screen, multiple panels, collage, grid, multiple characters, realistic, 3D render, photorealistic\n\n",
+      "resolution": 1024,
+      "clip": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImage21",
+    "_meta": {
+      "title": "④ 文本提示词（正面 / 负面）"
+    }
+  },
+  "5": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "⑤ 画布尺寸（建议 768~1024）"
+    }
+  },
+  "6": {
+    "inputs": {
+      "seed": 963930744118519,
+      "steps": 35,
+      "cfg": 4.5,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "1",
+        0
+      ],
+      "positive": [
+        "4",
+        0
+      ],
+      "negative": [
+        "4",
+        1
+      ],
+      "latent_image": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "⑥ 采样器（官方推荐参数）"
+    }
+  },
+  "7": {
+    "inputs": {
+      "samples": [
+        "6",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "8": {
+    "inputs": {
+      "filename_prefix": "Anima-Evolved v2.3-文生图",
+      "images": [
+        "7",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "⑦ 保存结果"
+    }
+  }
+}

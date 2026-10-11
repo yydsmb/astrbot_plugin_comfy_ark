@@ -39,11 +39,19 @@ from typing import Any
 # 规范参数
 # ----------------------------------------------------------------------
 CANONICAL_REF_PARAM = "reference_source"
+# v3.1.0：让模型自己挑本地工作流。云端后端不区分工作流，这个参数只对本地生效。
+CANONICAL_WORKFLOW_PARAM = "workflow"
 
 REF_SOURCE_VALUES = ("auto", "persona", "message", "none")
 
 # 本工具**真实**存在的参数。除了这几个，其它一律算「未知参数」。
-REAL_PARAMS = ("prompt", CANONICAL_REF_PARAM, "size", "count")
+REAL_PARAMS = (
+    "prompt",
+    CANONICAL_REF_PARAM,
+    CANONICAL_WORKFLOW_PARAM,
+    "size",
+    "count",
+)
 
 # v2.0.2 起不再对外暴露的旧参数（历史遗留，仍作兼容接收）
 RETIRED_PARAM = "use_reference_image"
@@ -99,6 +107,36 @@ _ALIAS_ORDER: tuple[str, ...] = tuple(_norm_key(a) for a in REF_PARAM_ALIASES)
 _ALIAS_NORMS = frozenset(_ALIAS_ORDER)
 _CANON_NORM = _norm_key(CANONICAL_REF_PARAM)
 _ALIAS_RANK: dict[str, int] = {n: i for i, n in enumerate(_ALIAS_ORDER)}
+
+# 工作流类参数名的各种写法，同样「顺序即优先级」。
+# 刻意**不**收 "style" / "model" —— 它们更像在描述画风或云端模型，
+# 收进来会把模型正常的风格描述误判成工作流名，反而制造新的误会。
+WORKFLOW_PARAM_ALIASES: tuple[str, ...] = (
+    CANONICAL_WORKFLOW_PARAM,
+    "workflow_name",
+    "workflow_id",
+    "workflow_type",
+    "workflow_preset",
+    "workflow_mode",
+    "wokflow",
+    "pipeline",
+    "preset",
+    "preset_name",
+    "工作流",
+    "工作流名",
+    "工作流名称",
+    "预设",
+)
+
+_WF_ORDER: tuple[str, ...] = tuple(_norm_key(a) for a in WORKFLOW_PARAM_ALIASES)
+_WF_NORMS = frozenset(_WF_ORDER)
+_CANON_WF_NORM = _norm_key(CANONICAL_WORKFLOW_PARAM)
+# 用 setdefault 而不是字典推导：别名归一化后可能互相撞车（"work_flow" 与
+# "workflow" 去掉下划线就是同一个词），推导式会让**靠后的**索引覆盖靠前的，
+# 于是规范名的优先级被自己的别名压下去（实测踩过：同时写两个参数时选错了那个）。
+_WF_RANK: dict[str, int] = {}
+for _i, _name in enumerate(_WF_ORDER):
+    _WF_RANK.setdefault(_name, _i)
 
 
 # ----------------------------------------------------------------------
@@ -318,6 +356,18 @@ class NormalizedArgs:
     unknown_params: list[str] = field(default_factory=list)
     """本工具根本没有的参数名（模型凭空发明的）。"""
 
+    workflow: str = ""
+    """最终采用的工作流名；空 = 模型没指定，由插件按需求自己挑。"""
+
+    workflow_param: str = ""
+    """实际被采纳的工作流参数名（保留模型的原始写法）。"""
+
+    workflow_raw: Any = None
+    """工作流参数的原始取值（取值不做映射，交给工作流清单去匹配）。"""
+
+    ignored_workflow_params: list[str] = field(default_factory=list)
+    """因为规范名已存在而被忽略的工作流别名。"""
+
     @property
     def coerced(self) -> bool:
         """是否发生过「参数名或取值」的翻译。"""
@@ -328,6 +378,13 @@ class NormalizedArgs:
         return not _is_canonical_literal(self.used_value)
 
     @property
+    def workflow_coerced(self) -> bool:
+        """工作流参数名被翻译过吗。取值不做映射 —— 那是工作流清单的活儿。"""
+        if not self.workflow_param:
+            return False
+        return _norm_key(self.workflow_param) != _CANON_WF_NORM
+
+    @property
     def has_news(self) -> bool:
         """有没有需要说出来的事。"""
         return bool(
@@ -335,6 +392,8 @@ class NormalizedArgs:
             or self.bad_value
             or self.ignored_ref_params
             or self.unknown_params
+            or self.workflow_coerced
+            or self.ignored_workflow_params
         )
 
 
@@ -378,9 +437,27 @@ def normalize_tool_args(
             norm.bad_value = _short(norm.used_value)
         norm.ignored_ref_params = [k for k in present if k != pick]
 
-    # 3) 未知参数：既不在真实参数表里，也不是参考图类的别名
+    # 2.5) 工作流参数：同样按别名优先级挑一个。
+    # 取值不在这里归一 —— 「美感版」这种名字属于工作流清单，只有插件知道有哪些。
+    wf_present: list[str] = []
+    for key in args:
+        if _norm_key(key) in _WF_NORMS and key not in wf_present:
+            wf_present.append(key)
+    wf_present.sort(key=lambda k: _WF_RANK.get(_norm_key(k), len(_WF_ORDER)))
+    if wf_present:
+        pick_wf = wf_present[0]
+        norm.workflow_param = pick_wf
+        norm.workflow_raw = args[pick_wf]
+        norm.workflow = coerce_str(norm.workflow_raw).strip()
+        norm.ignored_workflow_params = [k for k in wf_present if k != pick_wf]
+
+    # 3) 未知参数：既不在真实参数表里，也不是参考图 / 工作流类的别名
     norm.unknown_params = [
-        str(k) for k in args if k not in known_set and _norm_key(k) not in _ALIAS_NORMS
+        str(k)
+        for k in args
+        if k not in known_set
+        and _norm_key(k) not in _ALIAS_NORMS
+        and _norm_key(k) not in _WF_NORMS
     ]
 
     return norm
@@ -419,6 +496,17 @@ def describe_arg_fixes(norm: NormalizedArgs) -> tuple[str, str]:
             + "、".join(norm.ignored_ref_params)
             + " 已被忽略（你写了两个开关）"
         )
+    if norm.workflow_coerced:
+        llm_bits.append(
+            f"你传的是 {norm.workflow_param}={_short(norm.workflow_raw)}，"
+            f"插件已理解为 workflow={_short(norm.workflow)}"
+        )
+    if norm.ignored_workflow_params:
+        llm_bits.append(
+            "同时出现的 "
+            + "、".join(norm.ignored_workflow_params)
+            + " 已被忽略（工作流参数只认一个）"
+        )
     if norm.unknown_params:
         names = "、".join(norm.unknown_params)
         llm_bits.append(f"参数 {names} 本工具没有，已忽略")
@@ -429,7 +517,7 @@ def describe_arg_fixes(norm: NormalizedArgs) -> tuple[str, str]:
         "\n（工具参数提示："
         + "；".join(llm_bits)
         + f"。本工具的参数只有 {params_zh}，参考图一律用 {CANONICAL_REF_PARAM}，"
-        "不要自己另起名字。）"
+        f"工作流一律用 {CANONICAL_WORKFLOW_PARAM}，不要自己另起名字。）"
     )
     user_tip = "（" + "；".join(user_bits) + "）" if user_bits else ""
     return llm_tip, user_tip

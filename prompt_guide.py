@@ -90,11 +90,35 @@ def _candidate_hint(candidates: list[str] | None, suggestion: str) -> str:
     return "（" + "；".join(parts) + "）"
 
 
+# 工作流那一节的标题（接在 SYSTEM_RULES 的「三、调用前自检」之后）
+WORKFLOW_HEADER = "四、选工作流（只对本地 ComfyUI 生效，云端不区分）"
+
+
+def build_workflow_section(menu_text: str, local_available: bool = True) -> str:
+    """拼「选工作流」那一节。
+
+    ``menu_text`` 是插件扫目录现扫出来的清单（名字 + 用途 + 吃不吃参考图）。
+    本地后端不可用时返回空串 —— 那段规则纯属噪声，白占注意力。
+    """
+    if not local_available or not (menu_text or "").strip():
+        return ""
+    return (
+        f"{WORKFLOW_HEADER}\n"
+        "用 workflow 参数点名，不传 = 插件按需求自己挑（推荐，除非下面有硬理由）。\n"
+        "可用清单：\n"
+        f"{menu_text.strip()}\n"
+        "硬规则：本次要用参考图时，只能点「支持参考图」的那一套，否则参考图白给。\n"
+        "点名了不存在的工作流不会静默换一套跑掉，插件会告诉你可选哪些。"
+    )
+
+
 def build_system_block(
     persona_name: str = "",
     ref_filename: str = "",
     candidates: list[str] | None = None,
     suggestion: str = "",
+    workflow_menu: str = "",
+    local_available: bool = True,
 ) -> str:
     """拼完整的一段（含动态事实）。"""
     fact = build_fact_line(
@@ -103,7 +127,11 @@ def build_system_block(
         candidates=candidates,
         suggestion=suggestion,
     )
-    return f"{SYSTEM_HEADER}\n{fact}\n{SYSTEM_RULES}"
+    parts = [SYSTEM_HEADER, fact, SYSTEM_RULES]
+    section = build_workflow_section(workflow_menu, local_available)
+    if section:
+        parts.append(section)
+    return "\n".join(parts)
 
 
 def inject_into_system_prompt(system_prompt: str, block: str) -> str:

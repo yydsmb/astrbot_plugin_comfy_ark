@@ -1,0 +1,131 @@
+{
+  "1": {
+    "inputs": {
+      "transformer": "qwen_image_21_base_quantfunc_int4_r128.safetensors",
+      "model_config": "qwen-image-2.1-int4",
+      "attention_backend": "auto",
+      "api_key": "",
+      "quality_enhance": false,
+      "pinned_memory": false
+    },
+    "class_type": "QuantFuncQwenImage21Loader",
+    "_meta": {
+      "title": "① 加载 QuantFunc 4-bit 模型"
+    }
+  },
+  "2": {
+    "inputs": {
+      "clip_name": "qwen3vl_8b_w4a8.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "② 加载文本编码器"
+    }
+  },
+  "3": {
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "③ 加载 VAE"
+    }
+  },
+  "5": {
+    "inputs": {
+      "device": "auto",
+      "dtype": "default",
+      "model": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "QwenImage21Cache",
+    "_meta": {
+      "title": "⑤ 模型缓存"
+    }
+  },
+  "6": {
+    "inputs": {
+      "prompt": "An original anime girl, floating in mid-air. She has long twin-tails that gradient from deep purple at the roots to bright pink at the tips, each tail wrapped with silver ribbons adorned with tiny bells and star charms. Straight bangs. Her left eye is golden, her right eye is blue, with star-shaped highlights in both pupils. She wears a gothic dress in white and deep blue, off-shoulder design, with a large deep-blue bow on her chest, centered with a glowing sapphire. The skirt is multi-layered: an outer translucent gauze printed with constellation patterns, and an inner deep-blue satin layer. A silver chain hangs at her waist, holding a small glass bottle filled with colorful liquid. She wears long gloves with glowing runes. Her right hand holds a crescent-moon staff, with a miniature planet floating at its tip. Her left hand is gently raised, fingertips emitting points of light. She wears white thigh-high stockings with lace tops, and deep-blue short boots with glowing stripes. Above her head floats a halo made of tiny gears and stars, slowly rotating. She wears a black choker with a key-shaped pendant. Her expression is gentle and mysterious, with a faint smile and deep eyes. The background is a ruined landscape under a night sky, with a giant broken clock in the distance, its hands frozen. Glowing book pages and candles float around. The ground is broken mirror shards reflecting the starry sky. Mysterious, dreamy, slightly melancholic atmosphere. Anime style, cel-shaded, rich details, layered lighting, high quality, masterpiece.",
+      "negative_prompt": "",
+      "resolution": 1024,
+      "clip": [
+        "2",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImage21",
+    "_meta": {
+      "title": "⑥ 文本描述 + 参考图"
+    }
+  },
+  "7": {
+    "inputs": {
+      "seed": 719690198749990,
+      "steps": 25,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "5",
+        0
+      ],
+      "positive": [
+        "6",
+        0
+      ],
+      "negative": [
+        "6",
+        1
+      ],
+      "latent_image": [
+        "6",
+        2
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "⑦ 采样器"
+    }
+  },
+  "8": {
+    "inputs": {
+      "samples": [
+        "7",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "21": {
+    "inputs": {
+      "filename_prefix": "Qwen_QuantFunc-文生图",
+      "format": "png",
+      "format.bit_depth": "16-bit",
+      "format.input_color_space": "sRGB",
+      "images": [
+        "8",
+        0
+      ]
+    },
+    "class_type": "SaveImageAdvanced",
+    "_meta": {
+      "title": "保存图像（高级）"
+    }
+  }
+}
