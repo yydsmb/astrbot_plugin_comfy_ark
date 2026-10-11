@@ -128,6 +128,16 @@ def build_workflow_section(menu_text: str, local_available: bool = True) -> str:
 
 EXTRA_HEADER = "【插件配置里的额外设定】"
 
+# 「生图前先说一句」。刻意放最后 —— 它是说话风格提示而非硬规则，
+# 不该挤掉前面的决策规则与工作流清单。措辞是「可以」不是「必须」：
+# 插件不替模型决定这一次该不该开口。
+SAY_HINT = (
+    "【先说一句】调用本工具之前，你**可以**先对用户说一句话"
+    "（例：「好~我画一下」「稍等，我找找灵感」）。"
+    "说不说、说什么由你按当下语境自己判断 —— 画图要等几十秒，"
+    "先说一句能让用户知道你在忙；但别为了说话而说话，一句话就够。"
+)
+
 
 def build_system_block(
     persona_name: str = "",
@@ -137,6 +147,7 @@ def build_system_block(
     workflow_menu: str = "",
     local_available: bool = True,
     extra: str = "",
+    say: bool = True,
 ) -> str:
     """拼完整的一段（含动态事实）。
 
@@ -153,6 +164,8 @@ def build_system_block(
     section = build_workflow_section(workflow_menu, local_available)
     if section:
         parts.append(section)
+    if say:
+        parts.append(SAY_HINT)
     if (extra or "").strip():
         parts.append(f"{EXTRA_HEADER}\n{extra.strip()}")
     return "\n".join(parts)

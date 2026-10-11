@@ -287,7 +287,7 @@ from .workflows import (
 )
 
 PLUGIN_NAME = "astrbot_plugin_comfy_ark"
-PLUGIN_VERSION = "3.2.0"
+PLUGIN_VERSION = "3.3.0"
 API_URL = "https://ark.cn-beijing.volces.com/api/v3/images/generations"
 # Agent Plan / CodePlan 专属端点：模型名用「点号」形式（doubao-seedream-5.0-lite），
 # 且必须配套 plan 专属 API Key；拿普通 Key 访问会返回 401 AuthenticationError。
@@ -942,6 +942,9 @@ class ComfyArkImagePlugin(Star):
         # 用户自己填的补充设定（角色外貌特征、画风偏好…）。插件不内置任何具体
         # 角色 —— 那是部署方的事，写死了对别的用户就是噪声。这里只负责原样注入。
         self.prompt_guide_extra = str(cfg.get("prompt_guide_extra") or "").strip()
+        # 生图前先说一句：开着就把这条提示注入给 AI，**说不说由它自己判断**；
+        # 关掉则完全不注入（插件也不替它发 —— 那会变成一个写死的模板句）。
+        self.pre_generate_say = bool(cfg.get("pre_generate_say", True))
         self._guide_cache: dict[str, Any] = {}
         self.moderation_check_image = bool(cfg.get("moderation_check_image", True))
         # 拿不准时按不安全处理（严格）；默认宽松，避免误杀正常图
@@ -2094,6 +2097,7 @@ class ComfyArkImagePlugin(Star):
             workflow_menu=menu,
             local_available=local_ok,
             extra=self.prompt_guide_extra,
+            say=self.pre_generate_say,
         )
         self._guide_cache[umo] = (now, block)
         if len(self._guide_cache) > 200:  # 简单限长，别随会话数无限涨
@@ -3749,6 +3753,9 @@ class ComfyArkImagePlugin(Star):
         ============================================================
         其它约定
         ============================================================
+        · 先说一句：调用本工具之前，你可以先对用户说一句话（「好~我画一下」）——
+          说不说、说什么由你按语境自己判断。画图要等几十秒，先说一句能让用户
+          知道你在忙；但别为了说话而说话，一句话就够。
         · 参数名：控制参考图的参数只有 reference_source。不要写 use_reference_image /
           use_ref / reference / ref_source —— 写了插件也会归一化处理，但请直接写对。
         · 槽位：模板里的 <image1> / <image2> 交给插件翻译 —— 本地 Qwen 后端保留原样，

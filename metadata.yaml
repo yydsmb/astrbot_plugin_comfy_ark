@@ -58,7 +58,7 @@ desc: |
   [MIT License](https://opensource.org/license/mit)。可自由使用、修改、分发（含商用），保留版权与许可声明即可。
   完整条款见仓库根目录 `LICENSE`。
 
-version: 3.2.0
+version: 3.3.0
 author: 橙橘
 astrbot_version: ">=4.17.0"
 repo: https://github.com/yydsmb/astrbot_plugin_comfy_ark
